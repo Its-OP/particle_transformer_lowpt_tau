@@ -1,0 +1,12 @@
+requests
+tqdm
+h5py
+weaver-core
+pandas
+numpy
+awkward
+uproot
+vector
+
+--extra-index-url https://download.pytorch.org/whl/cu129
+torch

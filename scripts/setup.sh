@@ -14,6 +14,7 @@ conda activate parT
 
 pip install -r requirements.txt
 
+mkdir -p datasets
 python ./get_datasets.py QuarkGluon -d datasets
 
 echo "Setup complete. Run 'conda activate parT' to use the environment."

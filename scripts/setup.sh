@@ -14,6 +14,7 @@ conda activate parT
 
 echo "Installing requirements..."
 pip install -r requirements.txt
+conda install -y -c conda-forge pyarrow
 
 echo "Creating datasets directory..."
 mkdir -p ./datasets

@@ -1,20 +1,28 @@
 #!/bin/bash
 set -e
 
-cd "$(dirname "$0")/.."
+echo "Cloning repository..."
+git clone https://github.com/Its-OP/particle_transformer_lowpt_tau.git
+cd particle_transformer_lowpt_tau
 
-eval "$(conda shell.bash hook)"
+echo "Creating conda environment 'parT'..."
+conda create -n parT python=3.13 -y
 
-if ! command -v screen &> /dev/null; then
-    sudo apt-get update && sudo apt-get install -y screen
-fi
-
-conda env create -f environment.yml -n parT
+echo "Activating conda environment..."
+source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate parT
 
+echo "Installing requirements..."
 pip install -r requirements.txt
 
-mkdir -p datasets
+echo "Creating datasets directory..."
+mkdir -p ./datasets
+
+echo "Downloading QuarkGluon dataset..."
 python ./get_datasets.py QuarkGluon -d datasets
 
-echo "Setup complete. Run 'conda activate parT' to use the environment."
+echo "Installing screen..."
+sudo apt-get update && sudo apt-get install -y screen
+
+echo "Setup complete. Environment 'parT' is ready."
+echo "To activate: conda activate parT"

@@ -1,19 +1,18 @@
 #!/bin/bash
 set -e
 
-cd "$(dirname "$0")/.."
+REPO_DIR="particle_transformer_lowpt_tau"
 
-eval "$(conda shell.bash hook)"
-conda activate parT
+echo "Starting GPU profiling screen..."
+screen -dmS profiling bash -c "nvidia-smi -l 1"
 
-SESSION="parT-training"
+echo "Starting training screen..."
+screen -dmS training bash -c "conda activate parT && cd $REPO_DIR && ./train_QuarkGluon.sh ParT kinpid --batch-size 512 --num-workers 0"
 
-screen -dmS "$SESSION"
-
-screen -S "$SESSION" -X screen -t training bash -c './train_QuarkGluon.sh ParT kinpid --batch-size 64 --num-workers 0; exec bash'
-screen -S "$SESSION" -X screen -t profiling bash -c 'nvidia-smi -l 1; exec bash'
-
-echo "Started screen session '$SESSION' with windows: training, profiling"
-echo "Attach with: screen -r $SESSION"
-echo "Detach with: Ctrl+A, D"
-echo "Switch windows with: Ctrl+A, n"
+echo "Screens started:"
+echo "  - profiling: nvidia-smi monitoring"
+echo "  - training: ParT training"
+echo ""
+echo "Attach with: screen -r <name>"
+echo "List screens: screen -ls"
+echo "Exit screen: Ctrl + A, D"

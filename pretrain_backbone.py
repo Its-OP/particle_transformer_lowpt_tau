@@ -43,7 +43,9 @@ import json
 import logging
 import math
 import os
+import sys
 import time
+import traceback
 from datetime import datetime
 
 import torch
@@ -94,8 +96,41 @@ def build_experiment_directory(
     return experiment_dir, checkpoints_dir, tensorboard_dir
 
 
+class _TeeStream:
+    """Write stream that duplicates output to both original stream and a file.
+
+    Used to redirect stderr so that Python warnings (e.g. RuntimeWarning from
+    numpy overflow), DataLoader worker tracebacks, and any other stderr output
+    are captured in training.log alongside the structured log messages.
+    """
+
+    def __init__(self, original_stream, log_file_handle):
+        self.original_stream = original_stream
+        self.log_file_handle = log_file_handle
+
+    def write(self, message):
+        self.original_stream.write(message)
+        self.log_file_handle.write(message)
+        self.log_file_handle.flush()
+
+    def flush(self):
+        self.original_stream.flush()
+        self.log_file_handle.flush()
+
+    def fileno(self):
+        return self.original_stream.fileno()
+
+    def isatty(self):
+        return self.original_stream.isatty()
+
+
 def setup_logging(experiment_dir: str):
     """Configure logging to both stdout and a log file in the experiment root.
+
+    Sets up two output channels:
+    1. Structured logging (logger.*) → both stdout and training.log
+    2. stderr tee → training.log also captures Python warnings, tracebacks,
+       and any other unstructured error output from libraries / subprocesses.
 
     Note: We configure the logger directly instead of using basicConfig(),
     because basicConfig() is silently ignored if any other library (e.g.
@@ -119,6 +154,11 @@ def setup_logging(experiment_dir: str):
     logger.setLevel(logging.INFO)
     logger.addHandler(stream_handler)
     logger.addHandler(file_handler)
+
+    # Tee stderr → training.log so that Python warnings (e.g. RuntimeWarning),
+    # DataLoader worker errors, and unhandled tracebacks are also captured.
+    log_file_handle = open(log_file, 'a')  # noqa: SIM115 — kept open for process lifetime
+    sys.stderr = _TeeStream(sys.stderr, log_file_handle)
 
 
 def load_network_module(network_path: str):
@@ -594,4 +634,11 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except Exception:
+        # Log the full traceback so it appears in training.log even if the
+        # process crashes. The stderr tee will also capture it, but logging
+        # it explicitly ensures it gets a proper timestamp.
+        logger.error(f'Training failed with exception:\n{traceback.format_exc()}')
+        raise

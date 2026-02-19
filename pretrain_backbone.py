@@ -473,18 +473,21 @@ def main():
     logger.info(f'Found {len(parquet_files)} parquet files')
 
     file_dict = {'data': parquet_files}
+    num_parquet_files = len(parquet_files)
 
     # Training split: first train_fraction of each file.
     # in_memory=True loads the full dataset once and reshuffles indices each
     # epoch, avoiding the ~30s parquet re-read on every "Restarting DataIter".
-    # fetch_step=0 ensures all data is loaded in a single initial fetch.
+    # fetch_step=num_files loads all files in a single initial fetch.
+    # Note: fetch_step=0 does NOT work with fetch_by_files=True — weaver slices
+    # filelist[0:0] which gives an empty list and raises RuntimeError.
     train_dataset = SimpleIterDataset(
         file_dict,
         data_config_file=args.data_config,
         for_training=True,
         load_range_and_fraction=((0.0, args.train_fraction), 1.0),
         fetch_by_files=True,
-        fetch_step=0,
+        fetch_step=num_parquet_files,
         in_memory=True,
     )
     data_config = train_dataset.config
@@ -496,7 +499,7 @@ def main():
         for_training=False,
         load_range_and_fraction=((args.train_fraction, 1.0), 1.0),
         fetch_by_files=True,
-        fetch_step=0,
+        fetch_step=num_parquet_files,
         in_memory=True,
     )
 

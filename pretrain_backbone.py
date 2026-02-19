@@ -3,18 +3,28 @@
 Bypasses weaver's training loop to avoid fighting the regression mode interface.
 Uses weaver's dataset infrastructure for YAML parsing and parquet loading.
 
+Features:
+    - TensorBoard logging (per-batch and per-epoch scalars)
+    - JSON loss history export (for plotting without TensorBoard)
+    - File logging alongside stdout
+    - Checkpointing with backbone-only weight extraction
+    - Mixed precision (AMP) support
+    - Resume from checkpoint
+
 Usage:
-    python pretrain_backbone.py \
-        --data-config data/low-pt/lowpt_tau_pretrain.yaml \
-        --data-dir data/low-pt/ \
-        --network networks/lowpt_tau_BackbonePretrain.py \
-        --epochs 100 \
-        --batch-size 32 \
-        --lr 1e-3 \
-        --device cuda:0
+    python pretrain_backbone.py \\
+        --data-config data/low-pt/lowpt_tau_pretrain.yaml \\
+        --data-dir data/low-pt/ \\
+        --network networks/lowpt_tau_BackbonePretrain.py \\
+        --epochs 100 \\
+        --batch-size 32 \\
+        --lr 1e-3 \\
+        --device cuda:0 \\
+        --amp
 """
 import argparse
 import importlib.util
+import json
 import logging
 import math
 import os
@@ -22,14 +32,28 @@ import time
 
 import torch
 from torch.utils.data import DataLoader
+from torch.utils.tensorboard import SummaryWriter
 
 from weaver.utils.dataset import SimpleIterDataset
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-)
 logger = logging.getLogger('pretrain_backbone')
+
+
+def setup_logging(output_dir: str):
+    """Configure logging to both stdout and a log file.
+
+    Args:
+        output_dir: Directory where the log file will be written.
+    """
+    log_file = os.path.join(output_dir, 'training.log')
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.StreamHandler(),
+            logging.FileHandler(log_file),
+        ],
+    )
 
 
 def load_network_module(network_path: str):
@@ -56,7 +80,7 @@ def build_cosine_schedule_with_warmup(
 
     Learning rate schedule:
         - Linear warmup: lr scales from 0 to base_lr over num_warmup_steps
-        - Cosine decay: lr follows cos(π * progress / 2) from base_lr to 0
+        - Cosine decay: lr follows cos(π × progress / 2) from base_lr to 0
 
     Args:
         optimizer: Optimizer to schedule.
@@ -88,7 +112,9 @@ def train_one_epoch(
     device: torch.device,
     data_config,
     epoch: int,
-) -> float:
+    tensorboard_writer: SummaryWriter | None,
+    global_batch_count: int,
+) -> tuple[float, int]:
     """Train for one epoch.
 
     Args:
@@ -100,9 +126,11 @@ def train_one_epoch(
         device: Target device.
         data_config: Weaver DataConfig for input name ordering.
         epoch: Current epoch number (for logging).
+        tensorboard_writer: Optional TensorBoard SummaryWriter.
+        global_batch_count: Running batch counter across epochs.
 
     Returns:
-        Average loss for the epoch.
+        Tuple of (average_loss, updated_global_batch_count).
     """
     model.train()
     total_loss = 0.0
@@ -132,6 +160,16 @@ def train_one_epoch(
         batch_loss = loss.item()
         total_loss += batch_loss
         num_batches += 1
+        global_batch_count += 1
+
+        # TensorBoard: per-batch logging
+        if tensorboard_writer is not None:
+            tensorboard_writer.add_scalar(
+                'Loss/train_batch', batch_loss, global_batch_count
+            )
+            tensorboard_writer.add_scalar(
+                'LR/train', scheduler.get_last_lr()[0], global_batch_count
+            )
 
         if batch_idx % 20 == 0:
             elapsed = time.time() - start_time
@@ -145,7 +183,7 @@ def train_one_epoch(
             )
 
     avg_loss = total_loss / max(1, num_batches)
-    return avg_loss
+    return avg_loss, global_batch_count
 
 
 def validate(
@@ -179,8 +217,63 @@ def validate(
     return total_loss / max(1, num_batches)
 
 
+def save_loss_history(loss_history: dict, output_dir: str):
+    """Save loss history to JSON for later plotting.
+
+    Args:
+        loss_history: Dict with 'train' and 'val' lists of per-epoch losses.
+        output_dir: Directory to save the JSON file.
+    """
+    output_path = os.path.join(output_dir, 'loss_history.json')
+    with open(output_path, 'w') as file:
+        json.dump(loss_history, file, indent=2)
+
+
+def plot_loss_curves(loss_history: dict, output_dir: str):
+    """Generate and save loss curve plots.
+
+    Args:
+        loss_history: Dict with 'train', 'val', and 'lr' lists.
+        output_dir: Directory to save the plot.
+    """
+    try:
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+
+        fig, (axis_loss, axis_lr) = plt.subplots(1, 2, figsize=(14, 5))
+
+        epochs = range(1, len(loss_history['train']) + 1)
+
+        # Loss curves
+        axis_loss.plot(epochs, loss_history['train'], 'b-', label='Train')
+        axis_loss.plot(epochs, loss_history['val'], 'r-', label='Validation')
+        axis_loss.set_xlabel('Epoch')
+        axis_loss.set_ylabel('Loss')
+        axis_loss.set_title('Reconstruction Loss')
+        axis_loss.legend()
+        axis_loss.grid(True, alpha=0.3)
+
+        # Learning rate
+        axis_lr.plot(epochs, loss_history['lr'], 'g-')
+        axis_lr.set_xlabel('Epoch')
+        axis_lr.set_ylabel('Learning Rate')
+        axis_lr.set_title('Learning Rate Schedule')
+        axis_lr.grid(True, alpha=0.3)
+
+        fig.tight_layout()
+        output_path = os.path.join(output_dir, 'loss_curves.png')
+        fig.savefig(output_path, dpi=150)
+        plt.close(fig)
+        logger.info(f'Saved loss curves: {output_path}')
+    except ImportError:
+        logger.warning('matplotlib not available, skipping loss curve plot')
+
+
 def main():
-    parser = argparse.ArgumentParser(description='Backbone pretraining via masked track reconstruction')
+    parser = argparse.ArgumentParser(
+        description='Backbone pretraining via masked track reconstruction'
+    )
     parser.add_argument('--data-config', type=str, required=True,
                         help='Path to YAML data config')
     parser.add_argument('--data-dir', type=str, required=True,
@@ -203,13 +296,22 @@ def main():
                         help='Directory for saving checkpoints')
     parser.add_argument('--save-every', type=int, default=10,
                         help='Save checkpoint every N epochs')
+    parser.add_argument('--resume', type=str, default=None,
+                        help='Path to checkpoint to resume from')
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
+    setup_logging(args.output_dir)
     device = torch.device(args.device)
 
+    logger.info(f'Arguments: {vars(args)}')
+
+    # ---- TensorBoard ----
+    tensorboard_dir = os.path.join(args.output_dir, 'tensorboard')
+    tensorboard_writer = SummaryWriter(log_dir=tensorboard_dir)
+    logger.info(f'TensorBoard logs: {tensorboard_dir}')
+
     # ---- Data loading via weaver's dataset infrastructure ----
-    # Collect all parquet files in the data directory
     parquet_files = sorted([
         os.path.join(args.data_dir, f)
         for f in os.listdir(args.data_dir)
@@ -274,7 +376,6 @@ def main():
     )
 
     # Estimate total steps (approximate — iterable dataset doesn't have len())
-    # Use a rough estimate based on dataset size
     estimated_steps_per_epoch = 100  # will be refined after first epoch
     total_steps = args.epochs * estimated_steps_per_epoch
     warmup_steps = int(args.warmup_fraction * total_steps)
@@ -286,20 +387,53 @@ def main():
     # ---- Mixed precision ----
     grad_scaler = torch.amp.GradScaler('cuda') if args.amp else None
 
-    # ---- Training loop ----
+    # ---- Resume from checkpoint ----
+    start_epoch = 1
     best_val_loss = float('inf')
+    global_batch_count = 0
+    loss_history = {'train': [], 'val': [], 'lr': []}
 
-    for epoch in range(1, args.epochs + 1):
+    if args.resume is not None:
+        logger.info(f'Resuming from checkpoint: {args.resume}')
+        checkpoint = torch.load(args.resume, map_location=device, weights_only=False)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        start_epoch = checkpoint['epoch'] + 1
+        best_val_loss = checkpoint.get('best_val_loss', float('inf'))
+        global_batch_count = checkpoint.get('global_batch_count', 0)
+        loss_history = checkpoint.get('loss_history', loss_history)
+        logger.info(
+            f'Resumed at epoch {start_epoch}, '
+            f'best_val_loss={best_val_loss:.5f}'
+        )
+
+    # ---- Training loop ----
+    for epoch in range(start_epoch, args.epochs + 1):
         logger.info(f'=== Epoch {epoch}/{args.epochs} ===')
 
-        train_loss = train_one_epoch(
+        train_loss, global_batch_count = train_one_epoch(
             model, train_loader, optimizer, scheduler,
             grad_scaler, device, data_config, epoch,
+            tensorboard_writer, global_batch_count,
         )
         logger.info(f'Epoch {epoch} train loss: {train_loss:.5f}')
 
         val_loss = validate(model, val_loader, device, data_config)
         logger.info(f'Epoch {epoch} val loss: {val_loss:.5f}')
+
+        current_lr = scheduler.get_last_lr()[0]
+
+        # TensorBoard: per-epoch logging
+        tensorboard_writer.add_scalar('Loss/train_epoch', train_loss, epoch)
+        tensorboard_writer.add_scalar('Loss/val_epoch', val_loss, epoch)
+        tensorboard_writer.add_scalar('LR/epoch', current_lr, epoch)
+
+        # Loss history for JSON export and plotting
+        loss_history['train'].append(train_loss)
+        loss_history['val'].append(val_loss)
+        loss_history['lr'].append(current_lr)
+        save_loss_history(loss_history, args.output_dir)
 
         # Save checkpoint
         is_best = val_loss < best_val_loss
@@ -315,6 +449,8 @@ def main():
                 'train_loss': train_loss,
                 'val_loss': val_loss,
                 'best_val_loss': best_val_loss,
+                'global_batch_count': global_batch_count,
+                'loss_history': loss_history,
                 'args': vars(args),
             }
 
@@ -340,7 +476,17 @@ def main():
             torch.save(backbone_state, backbone_path)
             logger.info(f'Saved backbone weights: {backbone_path}')
 
+    # ---- Final outputs ----
+    tensorboard_writer.close()
+    plot_loss_curves(loss_history, args.output_dir)
     logger.info(f'Training complete. Best val loss: {best_val_loss:.5f}')
+    logger.info(f'Outputs in: {args.output_dir}')
+    logger.info(f'  - Checkpoints: checkpoint_epoch_*.pt, best_model.pt')
+    logger.info(f'  - Backbone weights: backbone_best.pt')
+    logger.info(f'  - Loss history: loss_history.json')
+    logger.info(f'  - Loss curves: loss_curves.png')
+    logger.info(f'  - TensorBoard: {tensorboard_dir}')
+    logger.info(f'  - Log: training.log')
 
 
 if __name__ == '__main__':

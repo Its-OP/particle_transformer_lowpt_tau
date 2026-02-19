@@ -132,6 +132,10 @@ def read_and_filter_pion_tracks(tree, track_branch_map, entry_start=None, entry_
     The filtering applies a boolean mask per event, so the output jagged arrays
     have variable length (only pion entries survive).
 
+    Also drops events where any track has corrupt eta (|eta| > 5 or NaN).
+    These are simulation artefacts (e.g. event 11960 in merged_noBKstar.root
+    has 24 tracks with eta up to ~7e31 and 2 with NaN).
+
     Args:
         tree: An uproot TTree object.
         track_branch_map: Dict mapping ROOT branch names to output column names.
@@ -139,15 +143,32 @@ def read_and_filter_pion_tracks(tree, track_branch_map, entry_start=None, entry_
         entry_stop: Optional last entry index (exclusive) to read.
 
     Returns:
-        A dict mapping ROOT branch names to filtered awkward arrays.
+        Tuple of (filtered_data, clean_event_mask) where:
+          - filtered_data: dict mapping ROOT branch names to filtered awkward arrays.
+          - clean_event_mask: boolean numpy array (True = event is clean).
     """
-    # Read all track branches needed, plus pdgId for filtering
+    # Read all track branches needed, plus pdgId and eta for filtering
     branches_to_read = list(track_branch_map.keys()) + ['Track_pdgId']
+    if 'Track_eta' not in branches_to_read:
+        branches_to_read.append('Track_eta')
     track_data = tree.arrays(
         expressions=branches_to_read,
         entry_start=entry_start,
         entry_stop=entry_stop,
     )
+
+    # Drop events with corrupt eta: |eta| > 5 or NaN on any track (before pion filter).
+    # CMS tracking covers |eta| < 2.5; values beyond 5 are unphysical.
+    eta = track_data['Track_eta']
+    corrupt_eta_mask = (np.abs(eta) > 5.0) | np.isnan(eta)
+    event_has_corrupt_eta = ak.any(corrupt_eta_mask, axis=1)
+    clean_event_mask = ~ak.to_numpy(event_has_corrupt_eta)
+
+    num_dropped = int(np.sum(~clean_event_mask))
+    if num_dropped > 0:
+        print(f'  Dropping {num_dropped} event(s) with corrupt eta values')
+
+    track_data = track_data[clean_event_mask]
 
     # Filter: keep only charged pions where |pdgId| == 211
     pion_mask = abs(track_data['Track_pdgId']) == PION_PDG_ID
@@ -156,19 +177,21 @@ def read_and_filter_pion_tracks(tree, track_branch_map, entry_start=None, entry_
     for root_branch_name in track_branch_map:
         filtered_data[root_branch_name] = track_data[root_branch_name][pion_mask]
 
-    return filtered_data
+    return filtered_data, clean_event_mask
 
 
-def read_event_info(tree, entry_start=None, entry_stop=None):
-    """Read event-level scalar branches (primary vertex).
+def read_event_info(tree, clean_event_mask, entry_start=None, entry_stop=None):
+    """Read event-level scalar branches (primary vertex), filtered to clean events.
 
     Args:
         tree: An uproot TTree object.
+        clean_event_mask: Boolean numpy array from read_and_filter_pion_tracks
+            (True = event is clean, False = event dropped for corrupt eta).
         entry_start: Optional first entry index to read.
         entry_stop: Optional last entry index (exclusive) to read.
 
     Returns:
-        A dict mapping branch names to numpy arrays (one value per event).
+        A dict mapping branch names to numpy arrays (one value per clean event).
     """
     event_data = tree.arrays(
         expressions=EVENT_BRANCHES,
@@ -176,7 +199,7 @@ def read_event_info(tree, entry_start=None, entry_stop=None):
         entry_stop=entry_stop,
     )
 
-    return {branch: ak.to_numpy(event_data[branch]) for branch in EVENT_BRANCHES}
+    return {branch: ak.to_numpy(event_data[branch])[clean_event_mask] for branch in EVENT_BRANCHES}
 
 
 # ---------------------------------------------------------------------------
@@ -333,14 +356,14 @@ def convert(input_filepath, output_filepath, entry_start=None, entry_stop=None,
         effective_start = 0
         effective_stop = number_of_events
 
-    # Read branches
+    # Read branches (also drops events with corrupt eta)
     print('  Reading track branches and filtering to |pdgId| == 211 ...')
-    raw_track_data = read_and_filter_pion_tracks(
+    raw_track_data, clean_event_mask = read_and_filter_pion_tracks(
         tree, track_branch_map, entry_start, entry_stop
     )
 
     print('  Reading event-level branches ...')
-    event_info = read_event_info(tree, entry_start, entry_stop)
+    event_info = read_event_info(tree, clean_event_mask, entry_start, entry_stop)
 
     # Compute pion counts per event (after filtering)
     # ak.num returns the number of elements in each inner list
@@ -371,10 +394,14 @@ def convert(input_filepath, output_filepath, entry_start=None, entry_stop=None,
     ak.to_parquet(output_array, output_filepath, compression='LZ4', compression_level=4)
 
     # Print summary statistics
-    number_of_processed_events = effective_stop - effective_start
+    number_of_input_events = effective_stop - effective_start
+    number_of_dropped_events = int(np.sum(~clean_event_mask))
+    number_of_output_events = number_of_input_events - number_of_dropped_events
 
     print(f'\n=== Conversion Summary ===')
-    print(f'  Events processed: {number_of_processed_events}')
+    print(f'  Events in input:  {number_of_input_events}')
+    print(f'  Events dropped:   {number_of_dropped_events} (corrupt eta)')
+    print(f'  Events in output: {number_of_output_events}')
     print(f'  Track columns: {sorted(track_features.keys())}')
     print(f'  Event-level columns: 4')
 

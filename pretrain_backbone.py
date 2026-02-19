@@ -397,7 +397,8 @@ def main():
                         help='Fraction of total steps for linear warmup')
     parser.add_argument('--train-fraction', type=float, default=0.8,
                         help='Fraction of data for training (rest is validation)')
-    parser.add_argument('--num-workers', type=int, default=2)
+    parser.add_argument('--num-workers', type=int, default=0,
+                        help='DataLoader workers (must be <= number of parquet files)')
     parser.add_argument('--device', type=str, default='cuda:0')
     parser.add_argument('--amp', action='store_true',
                         help='Enable mixed precision training')

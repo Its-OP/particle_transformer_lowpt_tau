@@ -2,28 +2,26 @@
 # =============================================================================
 # Training launch script for backbone pretraining.
 #
-# Starts a tmux session with two panes:
-#   - Top pane:    Training output (pretrain_backbone.py)
-#   - Bottom pane: GPU monitoring (nvidia-smi -l)
+# Starts two screen sessions:
+#   - "pretrain_train": Training output (pretrain_backbone.py)
+#   - "pretrain_gpu":   GPU monitoring (nvidia-smi, refreshes every second)
 #
 # Usage:
 #   bash train_pretrain.sh                  # default settings
 #   bash train_pretrain.sh --epochs 200     # override defaults
 #   bash train_pretrain.sh --resume checkpoints/pretrain/checkpoint_epoch_50.pt
 #
-# The script will:
-#   1. Activate the conda environment
-#   2. Create a tmux session named "pretrain"
-#   3. Run training in the top pane with TensorBoard logging
-#   4. Run nvidia-smi monitoring in the bottom pane
-#
 # To reattach after disconnecting:
-#   tmux attach -t pretrain
+#   screen -r pretrain_train    # training output
+#   screen -r pretrain_gpu      # GPU monitoring
+#
+# To detach from a screen:  Ctrl+A, then D
 # =============================================================================
 set -euo pipefail
 
 # ---- Configuration ----
-SESSION_NAME="pretrain"
+SESSION_TRAIN="pretrain_train"
+SESSION_GPU="pretrain_gpu"
 CONDA_ENV_NAME="part"
 
 # Default training arguments (can be overridden via command-line)
@@ -75,23 +73,24 @@ TRAIN_CMD="${CONDA_INIT} && cd ${SCRIPT_DIR} && python pretrain_backbone.py \
 # ---- GPU monitoring command ----
 GPU_MONITOR_CMD="watch -n 1 nvidia-smi"
 
-# ---- Check for existing session ----
-if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
-    echo "tmux session '${SESSION_NAME}' already exists."
-    echo "To reattach:  tmux attach -t ${SESSION_NAME}"
-    echo "To kill it:   tmux kill-session -t ${SESSION_NAME}"
+# ---- Check for existing sessions ----
+if screen -list | grep -q "${SESSION_TRAIN}"; then
+    echo "Screen session '${SESSION_TRAIN}' already exists."
+    echo "To reattach:  screen -r ${SESSION_TRAIN}"
+    echo "To kill it:   screen -S ${SESSION_TRAIN} -X quit"
     exit 1
 fi
 
 # ---- Create output directory ----
 mkdir -p "${SCRIPT_DIR}/${OUTPUT_DIR}"
 
-# ---- Launch tmux session ----
+# ---- Launch screen sessions ----
 echo "============================================"
-echo "  Launching pretraining in tmux"
+echo "  Launching pretraining in screen"
 echo "============================================"
 echo ""
-echo "Session:    ${SESSION_NAME}"
+echo "Session:    ${SESSION_TRAIN} (training)"
+echo "            ${SESSION_GPU} (GPU monitor)"
 echo "Output dir: ${SCRIPT_DIR}/${OUTPUT_DIR}"
 echo "Epochs:     ${EPOCHS}"
 echo "Batch size: ${BATCH_SIZE}"
@@ -103,27 +102,19 @@ if [ -n "$EXTRA_ARGS" ]; then
 fi
 echo ""
 
-# Create tmux session with the training command in the first pane
-tmux new-session -d -s "$SESSION_NAME" -x 200 -y 50 "$TRAIN_CMD; echo '--- Training finished. Press Enter to close. ---'; read"
+# Launch training in a detached screen session
+screen -dmS "$SESSION_TRAIN" bash -c "${TRAIN_CMD}; echo '--- Training finished. Press Enter to close. ---'; read"
 
-# Split horizontally (top/bottom) and run GPU monitoring in the bottom pane
-tmux split-window -v -t "$SESSION_NAME" "$GPU_MONITOR_CMD"
+# Launch GPU monitoring in a separate detached screen session
+screen -dmS "$SESSION_GPU" bash -c "$GPU_MONITOR_CMD"
 
-# Give training pane (top) 75% of the vertical space
-tmux resize-pane -t "${SESSION_NAME}:0.0" -y 75%
-
-# Select the training pane as active
-tmux select-pane -t "${SESSION_NAME}:0.0"
-
-echo "tmux session '${SESSION_NAME}' created."
+echo "Screen sessions created."
 echo ""
-echo "To attach:     tmux attach -t ${SESSION_NAME}"
-echo "To detach:     Ctrl+B, then D"
-echo "To switch pane: Ctrl+B, then arrow keys"
+echo "To view training:   screen -r ${SESSION_TRAIN}"
+echo "To view GPU usage:  screen -r ${SESSION_GPU}"
+echo "To detach:          Ctrl+A, then D"
+echo "To list sessions:   screen -ls"
 echo ""
 echo "TensorBoard (from another terminal):"
 echo "  ${CONDA_INIT} && tensorboard --logdir ${SCRIPT_DIR}/${OUTPUT_DIR}/tensorboard --bind_all"
 echo ""
-
-# Attach to the session
-tmux attach -t "$SESSION_NAME"

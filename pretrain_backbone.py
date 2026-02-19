@@ -219,6 +219,7 @@ def train_one_epoch(
     epoch: int,
     tensorboard_writer: SummaryWriter | None,
     global_batch_count: int,
+    grad_clip_max_norm: float = 1.0,
 ) -> tuple[float, int]:
     """Train for one epoch.
 
@@ -233,6 +234,7 @@ def train_one_epoch(
         epoch: Current epoch number (for logging).
         tensorboard_writer: Optional TensorBoard SummaryWriter.
         global_batch_count: Running batch counter across epochs.
+        grad_clip_max_norm: Maximum gradient norm for clipping (0 to disable).
 
     Returns:
         Tuple of (average_loss, updated_global_batch_count).
@@ -252,12 +254,33 @@ def train_one_epoch(
             per_event_loss = model(*inputs)
             loss = per_event_loss.mean()
 
+        # Skip batches with NaN loss — prevents poisoning model weights
+        # and the running average. Log the occurrence for debugging.
+        if torch.isnan(loss) or torch.isinf(loss):
+            logger.warning(
+                f'Epoch {epoch} | Batch {batch_idx} | '
+                f'Skipping batch with {"NaN" if torch.isnan(loss) else "Inf"} loss'
+            )
+            optimizer.zero_grad(set_to_none=True)
+            global_batch_count += 1
+            continue
+
         if grad_scaler is not None:
             grad_scaler.scale(loss).backward()
+            # Unscale before clipping so clip threshold is in true gradient scale
+            grad_scaler.unscale_(optimizer)
+            if grad_clip_max_norm > 0:
+                torch.nn.utils.clip_grad_norm_(
+                    model.parameters(), max_norm=grad_clip_max_norm
+                )
             grad_scaler.step(optimizer)
             grad_scaler.update()
         else:
             loss.backward()
+            if grad_clip_max_norm > 0:
+                torch.nn.utils.clip_grad_norm_(
+                    model.parameters(), max_norm=grad_clip_max_norm
+                )
             optimizer.step()
 
         scheduler.step()
@@ -395,6 +418,8 @@ def main():
     parser.add_argument('--weight-decay', type=float, default=0.01)
     parser.add_argument('--warmup-fraction', type=float, default=0.05,
                         help='Fraction of total steps for linear warmup')
+    parser.add_argument('--grad-clip', type=float, default=1.0,
+                        help='Max gradient norm for clipping (0 to disable)')
     parser.add_argument('--train-fraction', type=float, default=0.8,
                         help='Fraction of data for training (rest is validation)')
     parser.add_argument('--num-workers', type=int, default=1,
@@ -449,25 +474,30 @@ def main():
 
     file_dict = {'data': parquet_files}
 
-    # Training split: first train_fraction of each file
+    # Training split: first train_fraction of each file.
+    # in_memory=True loads the full dataset once and reshuffles indices each
+    # epoch, avoiding the ~30s parquet re-read on every "Restarting DataIter".
+    # fetch_step=0 ensures all data is loaded in a single initial fetch.
     train_dataset = SimpleIterDataset(
         file_dict,
         data_config_file=args.data_config,
         for_training=True,
         load_range_and_fraction=((0.0, args.train_fraction), 1.0),
         fetch_by_files=True,
-        fetch_step=1,
+        fetch_step=0,
+        in_memory=True,
     )
     data_config = train_dataset.config
 
-    # Validation split: remaining fraction
+    # Validation split: remaining fraction (also in-memory)
     val_dataset = SimpleIterDataset(
         file_dict,
         data_config_file=args.data_config,
         for_training=False,
         load_range_and_fraction=((args.train_fraction, 1.0), 1.0),
         fetch_by_files=True,
-        fetch_step=1,
+        fetch_step=0,
+        in_memory=True,
     )
 
     train_loader = DataLoader(
@@ -476,6 +506,7 @@ def main():
         drop_last=True,
         pin_memory=True,
         num_workers=args.num_workers,
+        persistent_workers=args.num_workers > 0,
     )
     val_loader = DataLoader(
         val_dataset,
@@ -483,6 +514,7 @@ def main():
         drop_last=False,
         pin_memory=True,
         num_workers=args.num_workers,
+        persistent_workers=args.num_workers > 0,
     )
 
     # ---- Model ----
@@ -562,6 +594,7 @@ def main():
             model, train_loader, optimizer, scheduler,
             grad_scaler, device, data_config, epoch,
             tensorboard_writer, global_batch_count,
+            grad_clip_max_norm=args.grad_clip,
         )
         logger.info(f'Epoch {epoch} train loss: {train_loss:.5f}')
 

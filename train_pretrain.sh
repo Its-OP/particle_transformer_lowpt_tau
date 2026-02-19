@@ -39,7 +39,7 @@ NETWORK="networks/lowpt_tau_BackbonePretrain.py"
 MODEL_NAME="BackbonePretrain"
 EXPERIMENTS_DIR="experiments"
 EPOCHS=100
-BATCH_SIZE=32
+BATCH_SIZE=256
 LEARNING_RATE=1e-3
 DEVICE="cuda:0"
 
@@ -83,7 +83,12 @@ TRAIN_CMD="${CONDA_INIT} && cd ${SCRIPT_DIR} && python pretrain_backbone.py \
 # ---- GPU monitoring command ----
 GPU_MONITOR_CMD="watch -n 1 nvidia-smi"
 
-# ---- Check for existing sessions ----
+# ---- Clean up existing sessions ----
+# Kill stale GPU monitor session from previous runs (these accumulate otherwise)
+if screen -list | grep -q "${SESSION_GPU}"; then
+    screen -S "${SESSION_GPU}" -X quit 2>/dev/null || true
+fi
+
 if screen -list | grep -q "${SESSION_TRAIN}"; then
     echo "Screen session '${SESSION_TRAIN}' already exists."
     echo "To reattach:  screen -r ${SESSION_TRAIN}"

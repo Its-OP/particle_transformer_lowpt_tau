@@ -88,9 +88,11 @@ GPU_MONITOR_CMD="watch -n 1 nvidia-smi"
 # When multiple sessions share the same name, `screen -S name -X quit` fails
 # with "several suitable screens" and kills nothing. So we extract each PID
 # and kill them individually by their unique PID.name identifier.
-screen -list | grep "\.${SESSION_GPU}" | awk '{print $1}' | while read -r session_id; do
+# grep returns exit code 1 when no sessions match, which kills the script
+# under set -euo pipefail. The "|| true" absorbs that.
+screen -list 2>/dev/null | grep "\.${SESSION_GPU}" | awk '{print $1}' | while read -r session_id; do
     screen -S "$session_id" -X quit 2>/dev/null || true
-done
+done || true
 
 if screen -list | grep -q "${SESSION_TRAIN}"; then
     echo "Screen session '${SESSION_TRAIN}' already exists."

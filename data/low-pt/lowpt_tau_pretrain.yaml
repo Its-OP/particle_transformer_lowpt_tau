@@ -11,8 +11,10 @@ new_variables:
    track_pz: track_pt * np.sinh(track_eta)
    ### Assumed pion mass: E = √(px² + py² + pz² + m_π²), m_π = 0.13957 GeV
    track_energy: np.sqrt(track_px**2 + track_py**2 + track_pz**2 + 0.13957**2)
-   ### Dummy label (constant 0) for self-supervised pretraining compatibility
-   dummy_label: np.zeros_like(event_n_tracks, dtype='float32')
+   ### Dummy label (constant 1) for self-supervised pretraining compatibility.
+   ### Must be 1.0 so weaver's _check_labels one-hot validation passes.
+   ### The actual loss is computed inside MaskedTrackPretrainer, not from this label.
+   dummy_label: np.ones_like(event_n_tracks, dtype='float32')
 
 preprocess:
   ### method: [manual, auto] - whether to use manually specified parameters for variable standardization

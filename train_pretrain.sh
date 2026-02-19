@@ -6,10 +6,18 @@
 #   - "pretrain_train": Training output (pretrain_backbone.py)
 #   - "pretrain_gpu":   GPU monitoring (nvidia-smi, refreshes every second)
 #
+# Each run creates a new experiment folder:
+#   experiments/{model_name}_{timestamp}/
+#       ├── training.log
+#       ├── loss_history.json
+#       ├── loss_curves.png
+#       ├── checkpoints/
+#       └── tensorboard/
+#
 # Usage:
 #   bash train_pretrain.sh                  # default settings
 #   bash train_pretrain.sh --epochs 200     # override defaults
-#   bash train_pretrain.sh --resume checkpoints/pretrain/checkpoint_epoch_50.pt
+#   bash train_pretrain.sh --resume experiments/BackbonePretrain_20260219_173000/checkpoints/checkpoint_epoch_50.pt
 #
 # To reattach after disconnecting:
 #   screen -r pretrain_train    # training output
@@ -28,7 +36,8 @@ CONDA_ENV_NAME="part"
 DATA_CONFIG="data/low-pt/lowpt_tau_pretrain.yaml"
 DATA_DIR="data/low-pt/"
 NETWORK="networks/lowpt_tau_BackbonePretrain.py"
-OUTPUT_DIR="checkpoints/pretrain"
+MODEL_NAME="BackbonePretrain"
+EXPERIMENTS_DIR="experiments"
 EPOCHS=100
 BATCH_SIZE=32
 LEARNING_RATE=1e-3
@@ -62,7 +71,8 @@ TRAIN_CMD="${CONDA_INIT} && cd ${SCRIPT_DIR} && python pretrain_backbone.py \
     --data-config ${DATA_CONFIG} \
     --data-dir ${DATA_DIR} \
     --network ${NETWORK} \
-    --output-dir ${OUTPUT_DIR} \
+    --model-name ${MODEL_NAME} \
+    --experiments-dir ${EXPERIMENTS_DIR} \
     --epochs ${EPOCHS} \
     --batch-size ${BATCH_SIZE} \
     --lr ${LEARNING_RATE} \
@@ -81,9 +91,6 @@ if screen -list | grep -q "${SESSION_TRAIN}"; then
     exit 1
 fi
 
-# ---- Create output directory ----
-mkdir -p "${SCRIPT_DIR}/${OUTPUT_DIR}"
-
 # ---- Launch screen sessions ----
 echo "============================================"
 echo "  Launching pretraining in screen"
@@ -91,7 +98,7 @@ echo "============================================"
 echo ""
 echo "Session:    ${SESSION_TRAIN} (training)"
 echo "            ${SESSION_GPU} (GPU monitor)"
-echo "Output dir: ${SCRIPT_DIR}/${OUTPUT_DIR}"
+echo "Experiments: ${SCRIPT_DIR}/${EXPERIMENTS_DIR}/"
 echo "Epochs:     ${EPOCHS}"
 echo "Batch size: ${BATCH_SIZE}"
 echo "LR:         ${LEARNING_RATE}"
@@ -116,5 +123,5 @@ echo "To detach:          Ctrl+A, then D"
 echo "To list sessions:   screen -ls"
 echo ""
 echo "TensorBoard (from another terminal):"
-echo "  ${CONDA_INIT} && tensorboard --logdir ${SCRIPT_DIR}/${OUTPUT_DIR}/tensorboard --bind_all"
+echo "  ${CONDA_INIT} && tensorboard --logdir ${SCRIPT_DIR}/${EXPERIMENTS_DIR} --bind_all"
 echo ""

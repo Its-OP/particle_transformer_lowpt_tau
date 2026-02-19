@@ -12,6 +12,19 @@ Features:
     - Checkpointing with backbone-only weight extraction
     - Resume from checkpoint
 
+Experiment directory layout:
+    experiments/
+    └── {model_name}_{timestamp}/
+        ├── training.log          # full console output
+        ├── loss_history.json     # per-epoch loss values
+        ├── loss_curves.png       # generated after training
+        ├── checkpoints/
+        │   ├── checkpoint_epoch_10.pt
+        │   ├── best_model.pt
+        │   └── backbone_best.pt
+        └── tensorboard/
+            └── events.out.tfevents.*
+
 Usage:
     python pretrain_backbone.py \\
         --data-config data/low-pt/lowpt_tau_pretrain.yaml \\
@@ -31,6 +44,7 @@ import logging
 import math
 import os
 import time
+from datetime import datetime
 
 import torch
 from torch.utils.data import DataLoader
@@ -41,21 +55,70 @@ from weaver.utils.dataset import SimpleIterDataset
 logger = logging.getLogger('pretrain_backbone')
 
 
-def setup_logging(output_dir: str):
-    """Configure logging to both stdout and a log file.
+def build_experiment_directory(
+    experiments_base: str,
+    model_name: str,
+    resume_dir: str | None,
+) -> tuple[str, str, str]:
+    """Create or resolve the experiment directory structure.
+
+    Layout:
+        {experiments_base}/{model_name}_{timestamp}/
+            ├── checkpoints/
+            └── tensorboard/
+
+    When resuming, reuses the existing experiment directory.
 
     Args:
-        output_dir: Directory where the log file will be written.
+        experiments_base: Root experiments folder (e.g. 'experiments').
+        model_name: Short model identifier (e.g. 'BackbonePretrain').
+        resume_dir: If resuming, path to the existing experiment root.
+
+    Returns:
+        Tuple of (experiment_dir, checkpoints_dir, tensorboard_dir).
     """
-    log_file = os.path.join(output_dir, 'training.log')
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        handlers=[
-            logging.StreamHandler(),
-            logging.FileHandler(log_file),
-        ],
+    if resume_dir is not None:
+        experiment_dir = resume_dir
+    else:
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        experiment_name = f'{model_name}_{timestamp}'
+        experiment_dir = os.path.join(experiments_base, experiment_name)
+
+    checkpoints_dir = os.path.join(experiment_dir, 'checkpoints')
+    tensorboard_dir = os.path.join(experiment_dir, 'tensorboard')
+
+    os.makedirs(experiment_dir, exist_ok=True)
+    os.makedirs(checkpoints_dir, exist_ok=True)
+    os.makedirs(tensorboard_dir, exist_ok=True)
+
+    return experiment_dir, checkpoints_dir, tensorboard_dir
+
+
+def setup_logging(experiment_dir: str):
+    """Configure logging to both stdout and a log file in the experiment root.
+
+    Note: We configure the logger directly instead of using basicConfig(),
+    because basicConfig() is silently ignored if any other library (e.g.
+    numexpr) has already initialised the root logger.
+
+    Args:
+        experiment_dir: Experiment root directory for the log file.
+    """
+    log_file = os.path.join(experiment_dir, 'training.log')
+    formatter = logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     )
+
+    stream_handler = logging.StreamHandler()
+    stream_handler.setFormatter(formatter)
+
+    file_handler = logging.FileHandler(log_file)
+    file_handler.setFormatter(formatter)
+
+    # Configure our logger (not root) so it works regardless of import order
+    logger.setLevel(logging.INFO)
+    logger.addHandler(stream_handler)
+    logger.addHandler(file_handler)
 
 
 def load_network_module(network_path: str):
@@ -219,24 +282,24 @@ def validate(
     return total_loss / max(1, num_batches)
 
 
-def save_loss_history(loss_history: dict, output_dir: str):
+def save_loss_history(loss_history: dict, experiment_dir: str):
     """Save loss history to JSON for later plotting.
 
     Args:
         loss_history: Dict with 'train' and 'val' lists of per-epoch losses.
-        output_dir: Directory to save the JSON file.
+        experiment_dir: Experiment root directory for the JSON file.
     """
-    output_path = os.path.join(output_dir, 'loss_history.json')
+    output_path = os.path.join(experiment_dir, 'loss_history.json')
     with open(output_path, 'w') as file:
         json.dump(loss_history, file, indent=2)
 
 
-def plot_loss_curves(loss_history: dict, output_dir: str):
-    """Generate and save loss curve plots.
+def plot_loss_curves(loss_history: dict, experiment_dir: str):
+    """Generate and save loss curve plots to the experiment root.
 
     Args:
         loss_history: Dict with 'train', 'val', and 'lr' lists.
-        output_dir: Directory to save the plot.
+        experiment_dir: Experiment root directory for the plot.
     """
     try:
         import matplotlib
@@ -264,7 +327,7 @@ def plot_loss_curves(loss_history: dict, output_dir: str):
         axis_lr.grid(True, alpha=0.3)
 
         fig.tight_layout()
-        output_path = os.path.join(output_dir, 'loss_curves.png')
+        output_path = os.path.join(experiment_dir, 'loss_curves.png')
         fig.savefig(output_path, dpi=150)
         plt.close(fig)
         logger.info(f'Saved loss curves: {output_path}')
@@ -282,6 +345,10 @@ def main():
                         help='Directory containing parquet files')
     parser.add_argument('--network', type=str, required=True,
                         help='Path to network wrapper Python file')
+    parser.add_argument('--model-name', type=str, default='BackbonePretrain',
+                        help='Short model name for experiment folder naming')
+    parser.add_argument('--experiments-dir', type=str, default='experiments',
+                        help='Root directory for all experiments')
     parser.add_argument('--epochs', type=int, default=100)
     parser.add_argument('--batch-size', type=int, default=32)
     parser.add_argument('--lr', type=float, default=1e-3)
@@ -296,22 +363,36 @@ def main():
                         help='Enable mixed precision training')
     parser.add_argument('--no-compile', action='store_true',
                         help='Disable torch.compile (enabled by default on CUDA)')
-    parser.add_argument('--output-dir', type=str, default='checkpoints/pretrain',
-                        help='Directory for saving checkpoints')
     parser.add_argument('--save-every', type=int, default=10,
                         help='Save checkpoint every N epochs')
     parser.add_argument('--resume', type=str, default=None,
                         help='Path to checkpoint to resume from')
     args = parser.parse_args()
 
-    os.makedirs(args.output_dir, exist_ok=True)
-    setup_logging(args.output_dir)
+    # ---- Experiment directory setup ----
+    # When resuming, reuse the existing experiment directory (checkpoint's grandparent).
+    # Otherwise, create a new one with a timestamp.
+    resume_experiment_dir = None
+    if args.resume is not None:
+        # Checkpoint lives at experiments/{name}/checkpoints/checkpoint_epoch_N.pt
+        # So grandparent = experiment root
+        resume_experiment_dir = os.path.dirname(os.path.dirname(
+            os.path.abspath(args.resume)
+        ))
+
+    experiment_dir, checkpoints_dir, tensorboard_dir = build_experiment_directory(
+        experiments_base=args.experiments_dir,
+        model_name=args.model_name,
+        resume_dir=resume_experiment_dir,
+    )
+
+    setup_logging(experiment_dir)
     device = torch.device(args.device)
 
+    logger.info(f'Experiment directory: {experiment_dir}')
     logger.info(f'Arguments: {vars(args)}')
 
     # ---- TensorBoard ----
-    tensorboard_dir = os.path.join(args.output_dir, 'tensorboard')
     tensorboard_writer = SummaryWriter(log_dir=tensorboard_dir)
     logger.info(f'TensorBoard logs: {tensorboard_dir}')
 
@@ -457,7 +538,7 @@ def main():
         loss_history['train'].append(train_loss)
         loss_history['val'].append(val_loss)
         loss_history['lr'].append(current_lr)
-        save_loss_history(loss_history, args.output_dir)
+        save_loss_history(loss_history, experiment_dir)
 
         # Save checkpoint
         is_best = val_loss < best_val_loss
@@ -479,13 +560,13 @@ def main():
             }
 
             checkpoint_path = os.path.join(
-                args.output_dir, f'checkpoint_epoch_{epoch}.pt'
+                checkpoints_dir, f'checkpoint_epoch_{epoch}.pt'
             )
             torch.save(checkpoint, checkpoint_path)
             logger.info(f'Saved checkpoint: {checkpoint_path}')
 
             if is_best:
-                best_path = os.path.join(args.output_dir, 'best_model.pt')
+                best_path = os.path.join(checkpoints_dir, 'best_model.pt')
                 torch.save(checkpoint, best_path)
                 logger.info(f'New best model (val_loss={val_loss:.5f})')
 
@@ -496,21 +577,20 @@ def main():
                 for k, v in original_model.state_dict().items()
                 if k.startswith('backbone.')
             }
-            backbone_path = os.path.join(args.output_dir, 'backbone_best.pt')
+            backbone_path = os.path.join(checkpoints_dir, 'backbone_best.pt')
             torch.save(backbone_state, backbone_path)
             logger.info(f'Saved backbone weights: {backbone_path}')
 
     # ---- Final outputs ----
     tensorboard_writer.close()
-    plot_loss_curves(loss_history, args.output_dir)
+    plot_loss_curves(loss_history, experiment_dir)
     logger.info(f'Training complete. Best val loss: {best_val_loss:.5f}')
-    logger.info(f'Outputs in: {args.output_dir}')
-    logger.info(f'  - Checkpoints: checkpoint_epoch_*.pt, best_model.pt')
-    logger.info(f'  - Backbone weights: backbone_best.pt')
+    logger.info(f'Experiment: {experiment_dir}')
+    logger.info(f'  - Log: training.log')
     logger.info(f'  - Loss history: loss_history.json')
     logger.info(f'  - Loss curves: loss_curves.png')
-    logger.info(f'  - TensorBoard: {tensorboard_dir}')
-    logger.info(f'  - Log: training.log')
+    logger.info(f'  - Checkpoints: checkpoints/')
+    logger.info(f'  - TensorBoard: tensorboard/')
 
 
 if __name__ == '__main__':

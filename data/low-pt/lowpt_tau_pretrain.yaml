@@ -8,7 +8,8 @@ new_variables:
    track_mask: ak.ones_like(track_eta)
    ### Clamp eta to CMS detector range — 26 tracks in the dataset have corrupt
    ### eta values (up to ~7e31), which cause sinh overflow in float32.
-   track_eta_clamped: np.clip(track_eta, -5.0, 5.0)
+   ### Uses ak.where instead of np.clip because track_eta is a jagged array.
+   track_eta_clamped: ak.where(track_eta < -5.0, -5.0, ak.where(track_eta > 5.0, 5.0, track_eta))
    track_px: track_pt * np.cos(track_phi)
    track_py: track_pt * np.sin(track_phi)
    track_pz: track_pt * np.sinh(track_eta_clamped)

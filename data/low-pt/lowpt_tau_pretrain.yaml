@@ -1,0 +1,71 @@
+selection:
+   ### use `&`, `|`, `~` for logical operations on numpy arrays
+   ### can use functions from `math`, `np` (numpy), and `awkward` in the expression
+
+new_variables:
+   ### [format] name: formula
+   ### can use functions from `math`, `np` (numpy), and `awkward` in the expression
+   track_mask: ak.ones_like(track_eta)
+   track_px: track_pt * np.cos(track_phi)
+   track_py: track_pt * np.sin(track_phi)
+   track_pz: track_pt * np.sinh(track_eta)
+   ### Assumed pion mass: E = √(px² + py² + pz² + m_π²), m_π = 0.13957 GeV
+   track_energy: np.sqrt(track_px**2 + track_py**2 + track_pz**2 + 0.13957**2)
+   ### Dummy label (constant 0) for self-supervised pretraining compatibility
+   dummy_label: np.zeros_like(event_n_tracks, dtype='float32')
+
+preprocess:
+  ### method: [manual, auto] - whether to use manually specified parameters for variable standardization
+  method: manual
+  ### data_fraction: fraction of events to use when calculating the mean/scale for the standardization
+  data_fraction: 0.5
+
+inputs:
+   pf_points:
+      length: 2800
+      pad_mode: wrap
+      vars:
+         - [track_eta, null]
+         - [track_phi, null]
+   pf_features:
+      length: 2800
+      pad_mode: wrap
+      vars:
+      ### [format 1]: var_name (no transformation)
+      ### [format 2]: [var_name,
+      ###              subtract_by(optional, default=None, no transf. if preprocess.method=manual, auto transf. if preprocess.method=auto),
+      ###              multiply_by(optional, default=1),
+      ###              clip_min(optional, default=-5),
+      ###              clip_max(optional, default=5),
+      ###              pad_value(optional, default=0)]
+         - [track_px, null]
+         - [track_py, null]
+         - [track_pz, null]
+         - [track_eta, null]
+         - [track_phi, null]
+         - [track_charge, null]
+         - [track_dxy_significance, null]
+   pf_vectors:
+      length: 2800
+      pad_mode: wrap
+      vars:
+         - [track_px, null]
+         - [track_py, null]
+         - [track_pz, null]
+         - [track_energy, null]
+   pf_mask:
+      length: 2800
+      pad_mode: constant
+      vars:
+         - [track_mask, null]
+
+labels:
+   ### Dummy label for self-supervised pretraining.
+   ### The actual loss is computed inside MaskedTrackPretrainer.
+   type: simple
+   value: [dummy_label]
+
+observers:
+   - event_n_tracks
+
+weights:

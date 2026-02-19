@@ -46,10 +46,10 @@ PION_PDG_ID = 211
 
 ROOT_TREE_NAME = 'Events'
 
-# Mapping from ROOT branch names to output column names for track (pion) features.
+# Complete mapping from ROOT branch names to output column names for track features.
 # Only raw features are stored — derived features (log pT, 4-vectors, tanh(dxy),
 # vertex displacements, etc.) are computed by weaver at runtime via YAML new_variables.
-TRACK_BRANCH_MAP = {
+TRACK_BRANCH_MAP_ALL = {
     'Track_pt': 'track_pt',
     'Track_eta': 'track_eta',
     'Track_phi': 'track_phi',
@@ -76,6 +76,19 @@ TRACK_BRANCH_MAP = {
     'Track_vz': 'track_vertex_z',
     'Track_trackFromTau': 'track_label_from_tau',
 }
+
+# Default subset of output columns to extract. These are the columns needed
+# for the hierarchical graph backbone (7 input features + label).
+# Use --columns to override with a comma-separated list of output column names,
+# or --all-columns to extract all available columns.
+DEFAULT_COLUMNS = [
+    'track_pt',
+    'track_eta',
+    'track_phi',
+    'track_charge',
+    'track_dxy_significance',
+    'track_label_from_tau',
+]
 
 # Event-level branches (scalars per event).
 EVENT_BRANCHES = ['PV_x', 'PV_y', 'PV_z']
@@ -113,7 +126,7 @@ def load_root_tree(filepath):
     return root_file[ROOT_TREE_NAME]
 
 
-def read_and_filter_pion_tracks(tree, entry_start=None, entry_stop=None):
+def read_and_filter_pion_tracks(tree, track_branch_map, entry_start=None, entry_stop=None):
     """Read Track branches and filter to keep only charged pions (|pdgId| == 211).
 
     The filtering applies a boolean mask per event, so the output jagged arrays
@@ -121,6 +134,7 @@ def read_and_filter_pion_tracks(tree, entry_start=None, entry_stop=None):
 
     Args:
         tree: An uproot TTree object.
+        track_branch_map: Dict mapping ROOT branch names to output column names.
         entry_start: Optional first entry index to read.
         entry_stop: Optional last entry index (exclusive) to read.
 
@@ -128,7 +142,7 @@ def read_and_filter_pion_tracks(tree, entry_start=None, entry_stop=None):
         A dict mapping ROOT branch names to filtered awkward arrays.
     """
     # Read all track branches needed, plus pdgId for filtering
-    branches_to_read = list(TRACK_BRANCH_MAP.keys()) + ['Track_pdgId']
+    branches_to_read = list(track_branch_map.keys()) + ['Track_pdgId']
     track_data = tree.arrays(
         expressions=branches_to_read,
         entry_start=entry_start,
@@ -139,7 +153,7 @@ def read_and_filter_pion_tracks(tree, entry_start=None, entry_stop=None):
     pion_mask = abs(track_data['Track_pdgId']) == PION_PDG_ID
 
     filtered_data = {}
-    for root_branch_name in TRACK_BRANCH_MAP:
+    for root_branch_name in track_branch_map:
         filtered_data[root_branch_name] = track_data[root_branch_name][pion_mask]
 
     return filtered_data
@@ -248,7 +262,41 @@ def build_output_table(track_features, event_info, pion_counts):
 # Main conversion
 # ---------------------------------------------------------------------------
 
-def convert(input_filepath, output_filepath, entry_start=None, entry_stop=None):
+def build_track_branch_map(output_columns=None):
+    """Build a ROOT→output branch map for the requested output columns.
+
+    Args:
+        output_columns: List of output column names to include, or None
+            for DEFAULT_COLUMNS. Use list(TRACK_BRANCH_MAP_ALL.values())
+            for all available columns.
+
+    Returns:
+        Dict mapping ROOT branch names to output column names.
+
+    Raises:
+        ValueError: If a requested column is not in TRACK_BRANCH_MAP_ALL.
+    """
+    if output_columns is None:
+        output_columns = DEFAULT_COLUMNS
+
+    # Build reverse map: output_name → root_name
+    reverse_map = {v: k for k, v in TRACK_BRANCH_MAP_ALL.items()}
+
+    track_branch_map = {}
+    for output_name in output_columns:
+        if output_name not in reverse_map:
+            available = sorted(TRACK_BRANCH_MAP_ALL.values())
+            raise ValueError(
+                f'Unknown output column: "{output_name}". '
+                f'Available columns: {available}'
+            )
+        track_branch_map[reverse_map[output_name]] = output_name
+
+    return track_branch_map
+
+
+def convert(input_filepath, output_filepath, entry_start=None, entry_stop=None,
+            output_columns=None):
     """Convert a ROOT file to Parquet format.
 
     Reads the NanoAOD Events tree, filters tracks to charged pions,
@@ -261,8 +309,18 @@ def convert(input_filepath, output_filepath, entry_start=None, entry_stop=None):
         output_filepath: Path for the output Parquet file.
         entry_start: Optional first entry index to process.
         entry_stop: Optional last entry index (exclusive) to process.
+        output_columns: List of output column names to extract, or None
+            for DEFAULT_COLUMNS. Use 'all' for all available columns.
     """
+    # Build branch map for the requested columns
+    if output_columns == 'all':
+        track_branch_map = dict(TRACK_BRANCH_MAP_ALL)
+    else:
+        track_branch_map = build_track_branch_map(output_columns)
+
     print(f'Reading ROOT file: {input_filepath}')
+    print(f'  Extracting {len(track_branch_map)} track columns: '
+          f'{sorted(track_branch_map.values())}')
     tree = load_root_tree(input_filepath)
     number_of_events = tree.num_entries
     print(f'  Total events in file: {number_of_events}')
@@ -277,7 +335,9 @@ def convert(input_filepath, output_filepath, entry_start=None, entry_stop=None):
 
     # Read branches
     print('  Reading track branches and filtering to |pdgId| == 211 ...')
-    raw_track_data = read_and_filter_pion_tracks(tree, entry_start, entry_stop)
+    raw_track_data = read_and_filter_pion_tracks(
+        tree, track_branch_map, entry_start, entry_stop
+    )
 
     print('  Reading event-level branches ...')
     event_info = read_event_info(tree, entry_start, entry_stop)
@@ -285,11 +345,11 @@ def convert(input_filepath, output_filepath, entry_start=None, entry_stop=None):
     # Compute pion counts per event (after filtering)
     # ak.num returns the number of elements in each inner list
     pion_counts_per_event = ak.to_numpy(
-        ak.num(raw_track_data[list(TRACK_BRANCH_MAP.keys())[0]], axis=1)
+        ak.num(raw_track_data[list(track_branch_map.keys())[0]], axis=1)
     )
 
     # Rename track branches to output column names
-    track_features = rename_branches(raw_track_data, TRACK_BRANCH_MAP)
+    track_features = rename_branches(raw_track_data, track_branch_map)
 
     # Cast to consistent dtypes
     track_integer_columns = {'track_charge', 'track_n_valid_hits', 'track_n_valid_pixel_hits', 'track_label_from_tau'}
@@ -313,20 +373,9 @@ def convert(input_filepath, output_filepath, entry_start=None, entry_stop=None):
     # Print summary statistics
     number_of_processed_events = effective_stop - effective_start
 
-    # Per-track label distribution
-    track_labels = track_features['track_label_from_tau']
-    flat_labels = ak.to_numpy(ak.flatten(track_labels))
-    total_tracks = len(flat_labels)
-    tau_origin_tracks = int(np.sum(flat_labels == 1))
-    background_tracks = total_tracks - tau_origin_tracks
-
-    # Per-event tau-origin track counts
-    tau_tracks_per_event = ak.to_numpy(ak.sum(track_labels, axis=1))
-    tau_track_counts = Counter(tau_tracks_per_event.tolist())
-
     print(f'\n=== Conversion Summary ===')
     print(f'  Events processed: {number_of_processed_events}')
-    print(f'  Track feature columns: {len(track_features) - 1}')
+    print(f'  Track columns: {sorted(track_features.keys())}')
     print(f'  Event-level columns: 4')
 
     print(f'\n  Pion tracks per event:')
@@ -334,14 +383,26 @@ def convert(input_filepath, output_filepath, entry_start=None, entry_stop=None):
           f'max={pion_counts_per_event.max()}, '
           f'mean={pion_counts_per_event.mean():.1f}')
 
-    print(f'\n  Per-track label distribution (track_label_from_tau):')
-    print(f'    tau-origin tracks: {tau_origin_tracks}')
-    print(f'    background tracks: {background_tracks}')
-    print(f'    tau-origin fraction: {tau_origin_tracks / max(total_tracks, 1):.4f}')
+    if 'track_label_from_tau' in track_features:
+        # Per-track label distribution
+        track_labels = track_features['track_label_from_tau']
+        flat_labels = ak.to_numpy(ak.flatten(track_labels))
+        total_tracks = len(flat_labels)
+        tau_origin_tracks = int(np.sum(flat_labels == 1))
+        background_tracks = total_tracks - tau_origin_tracks
 
-    print(f'\n  Tau-origin tracks per event:')
-    for count in sorted(tau_track_counts):
-        print(f'    {count}: {tau_track_counts[count]} events')
+        # Per-event tau-origin track counts
+        tau_tracks_per_event = ak.to_numpy(ak.sum(track_labels, axis=1))
+        tau_track_counts = Counter(tau_tracks_per_event.tolist())
+
+        print(f'\n  Per-track label distribution (track_label_from_tau):')
+        print(f'    tau-origin tracks: {tau_origin_tracks}')
+        print(f'    background tracks: {background_tracks}')
+        print(f'    tau-origin fraction: {tau_origin_tracks / max(total_tracks, 1):.4f}')
+
+        print(f'\n  Tau-origin tracks per event:')
+        for count in sorted(tau_track_counts):
+            print(f'    {count}: {tau_track_counts[count]} events')
 
     print(f'\n  Output file: {output_filepath}')
     print(f'  Output size: {os.path.getsize(output_filepath) / 1024:.1f} KB')
@@ -353,8 +414,12 @@ def convert(input_filepath, output_filepath, entry_start=None, entry_stop=None):
 # ---------------------------------------------------------------------------
 
 def main():
+    available_columns = sorted(TRACK_BRANCH_MAP_ALL.values())
+
     parser = argparse.ArgumentParser(
-        description='Convert low-pT tau ROOT dataset (NanoAOD) to Parquet format.'
+        description='Convert low-pT tau ROOT dataset (NanoAOD) to Parquet format.',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=f'Available track columns:\n  ' + '\n  '.join(available_columns),
     )
     parser.add_argument(
         '-i', '--input',
@@ -378,9 +443,37 @@ def main():
         default=None,
         help='Last entry index to process, exclusive (optional, for chunked conversion)',
     )
+    column_group = parser.add_mutually_exclusive_group()
+    column_group.add_argument(
+        '--columns',
+        type=str,
+        default=None,
+        help=(
+            'Comma-separated list of output column names to extract. '
+            f'Default: {",".join(DEFAULT_COLUMNS)}'
+        ),
+    )
+    column_group.add_argument(
+        '--all-columns',
+        action='store_true',
+        help='Extract all available track columns (overrides --columns)',
+    )
 
     arguments = parser.parse_args()
-    convert(arguments.input, arguments.output, arguments.entry_start, arguments.entry_stop)
+
+    # Resolve column selection
+    if arguments.all_columns:
+        output_columns = 'all'
+    elif arguments.columns is not None:
+        output_columns = [c.strip() for c in arguments.columns.split(',')]
+    else:
+        output_columns = None  # uses DEFAULT_COLUMNS
+
+    convert(
+        arguments.input, arguments.output,
+        arguments.entry_start, arguments.entry_stop,
+        output_columns=output_columns,
+    )
 
 
 if __name__ == '__main__':

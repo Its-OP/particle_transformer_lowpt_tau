@@ -4,11 +4,12 @@ Bypasses weaver's training loop to avoid fighting the regression mode interface.
 Uses weaver's dataset infrastructure for YAML parsing and parquet loading.
 
 Features:
+    - torch.compile for optimized GPU kernels (enabled by default on CUDA)
+    - Mixed precision (AMP) support
     - TensorBoard logging (per-batch and per-epoch scalars)
     - JSON loss history export (for plotting without TensorBoard)
     - File logging alongside stdout
     - Checkpointing with backbone-only weight extraction
-    - Mixed precision (AMP) support
     - Resume from checkpoint
 
 Usage:
@@ -20,7 +21,8 @@ Usage:
         --batch-size 32 \\
         --lr 1e-3 \\
         --device cuda:0 \\
-        --amp
+        --amp \\
+        --no-compile  # optional: disable torch.compile
 """
 import argparse
 import importlib.util
@@ -292,6 +294,8 @@ def main():
     parser.add_argument('--device', type=str, default='cuda:0')
     parser.add_argument('--amp', action='store_true',
                         help='Enable mixed precision training')
+    parser.add_argument('--no-compile', action='store_true',
+                        help='Disable torch.compile (enabled by default on CUDA)')
     parser.add_argument('--output-dir', type=str, default='checkpoints/pretrain',
                         help='Directory for saving checkpoints')
     parser.add_argument('--save-every', type=int, default=10,
@@ -368,6 +372,24 @@ def main():
     logger.info(f'Model parameters: {num_params:,}')
     logger.info(f'Input names: {data_config.input_names}')
 
+    # Keep a reference to the original (uncompiled) model for state_dict access.
+    # torch.compile wraps the module, so we need the original for clean
+    # checkpoint saving and backbone weight extraction.
+    original_model = model
+
+    # ---- torch.compile ----
+    use_compile = (
+        not args.no_compile
+        and device.type == 'cuda'
+        and hasattr(torch, 'compile')
+    )
+    if use_compile:
+        logger.info('Compiling model with torch.compile (mode="default")...')
+        model = torch.compile(model, mode='default')
+        logger.info('Model compiled.')
+    else:
+        logger.info('torch.compile disabled.')
+
     # ---- Optimizer and scheduler ----
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -396,7 +418,9 @@ def main():
     if args.resume is not None:
         logger.info(f'Resuming from checkpoint: {args.resume}')
         checkpoint = torch.load(args.resume, map_location=device, weights_only=False)
-        model.load_state_dict(checkpoint['model_state_dict'])
+        # Load into the original (uncompiled) model — torch.compile wraps it,
+        # but state_dict keys come from the unwrapped module.
+        original_model.load_state_dict(checkpoint['model_state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
         start_epoch = checkpoint['epoch'] + 1
@@ -443,7 +467,7 @@ def main():
         if epoch % args.save_every == 0 or is_best or epoch == args.epochs:
             checkpoint = {
                 'epoch': epoch,
-                'model_state_dict': model.state_dict(),
+                'model_state_dict': original_model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'scheduler_state_dict': scheduler.state_dict(),
                 'train_loss': train_loss,
@@ -469,7 +493,7 @@ def main():
         if is_best:
             backbone_state = {
                 k.replace('backbone.', ''): v
-                for k, v in model.state_dict().items()
+                for k, v in original_model.state_dict().items()
                 if k.startswith('backbone.')
             }
             backbone_path = os.path.join(args.output_dir, 'backbone_best.pt')

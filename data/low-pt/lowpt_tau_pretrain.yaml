@@ -6,9 +6,12 @@ new_variables:
    ### [format] name: formula
    ### can use functions from `math`, `np` (numpy), and `awkward` in the expression
    track_mask: ak.ones_like(track_eta)
+   ### Clamp eta to CMS detector range — 26 tracks in the dataset have corrupt
+   ### eta values (up to ~7e31), which cause sinh overflow in float32.
+   track_eta_clamped: np.clip(track_eta, -5.0, 5.0)
    track_px: track_pt * np.cos(track_phi)
    track_py: track_pt * np.sin(track_phi)
-   track_pz: track_pt * np.sinh(track_eta)
+   track_pz: track_pt * np.sinh(track_eta_clamped)
    ### Assumed pion mass: E = √(px² + py² + pz² + m_π²), m_π = 0.13957 GeV
    track_energy: np.sqrt(track_px**2 + track_py**2 + track_pz**2 + 0.13957**2)
    ### Dummy label (constant 1) for self-supervised pretraining compatibility.
@@ -27,7 +30,7 @@ inputs:
       length: 2800
       pad_mode: wrap
       vars:
-         - [track_eta, null]
+         - [track_eta_clamped, null]
          - [track_phi, null]
    pf_features:
       length: 2800
@@ -43,7 +46,7 @@ inputs:
          - [track_px, null]
          - [track_py, null]
          - [track_pz, null]
-         - [track_eta, null]
+         - [track_eta_clamped, null]
          - [track_phi, null]
          - [track_charge, null]
          - [track_dxy_significance, null]

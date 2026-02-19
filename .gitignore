@@ -133,4 +133,5 @@ dmypy.json
 .idea
 *.tar
 *.parquet
+*.root
 runs/

@@ -1,0 +1,9 @@
+The dataset contains approximately 500k generated decays of neutral B-mesons into a pair of two tau-leptons and a resonance ($B^0 \to \tau^+ \tau^- K^{0*}$ or $B^0_s \to \tau^+ \tau^- \phi$) generated with Pythia 8\cite{10.21468/SciPostPhysCodeb.8} and decayed with EvtGen\cite{EvtGen}. 
+The detector response is simulated using the CMS-specific open-source software, CMSSW 14 \cite{CMSSW}.
+The sample contains sets of tacks originating from a) signal B-meson decays to two $\tau$-leptons and a resonance; b) pile-up decays; c) decays of the B-meson to the charm mesons, which are considered as a background.
+In the case of the signal, one $\tau$ lepton from the B-meson decays is deliberately forced to decay into a muon $\tau_\mu$. 
+This $\tau_\mu$ lepton is used to collect the real dataset in the CMS detector in the low-momentum kinematic phase space and must therefore be present.
+The other $\tau$ decays hadronically, $\tau_h$, and is the $\tau$ of interest. 
+The tracks are pre-combined into the $\tau_h$ candidates with geometrical and kinematic parameters precomputed.
+The true label specifying their origin: either real $\tau$, real D-meson, or pile-up, is preserved. 
+Surrounding tracks that cannot be combined into the $\tau_h$ candidate, either because they do not originate from the same point of origin or have ill-defined kinematics, are also retained to leverage information surrounding the $\tau_h$ candidate. 

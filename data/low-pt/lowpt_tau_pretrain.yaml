@@ -11,6 +11,18 @@ new_variables:
    track_pz: track_pt * np.sinh(track_eta)
    ### Assumed pion mass: E = √(px² + py² + pz² + m_π²), m_π = 0.13957 GeV
    track_energy: np.sqrt(track_px**2 + track_py**2 + track_pz**2 + 0.13957**2)
+   ###
+   ### Raw aliases: weaver's preprocess_params is a flat dict keyed by variable
+   ### name. If track_px appears in pf_features (bare → auto-standardized) and
+   ### pf_vectors ([track_px, null] → raw), the differing params trigger a
+   ### RuntimeError. Aliases let the same data exist under different names with
+   ### independent standardization settings.
+   track_eta_raw: track_eta
+   track_phi_raw: track_phi
+   track_px_raw: track_px
+   track_py_raw: track_py
+   track_pz_raw: track_pz
+   ###
    ### Dummy label (constant 1) for self-supervised pretraining compatibility.
    ### Must be 1.0 so weaver's _check_labels one-hot validation passes.
    ### The actual loss is computed inside MaskedTrackPretrainer, not from this label.
@@ -18,7 +30,10 @@ new_variables:
 
 preprocess:
   ### method: [manual, auto] - whether to use manually specified parameters for variable standardization
-  method: manual
+  ### auto: computes median + IQR-based scale from data sample, then applies (x - median) * scale
+  ### clipped to [-5, 5]. Only affects variables WITHOUT explicit null center (bare names).
+  ### Variables with [var_name, null] keep center=None → pass through raw.
+  method: auto
   ### data_fraction: fraction of events to use when calculating the mean/scale for the standardization
   data_fraction: 0.5
 
@@ -27,33 +42,40 @@ inputs:
       length: 2800
       pad_mode: wrap
       vars:
-         - [track_eta, null]
-         - [track_phi, null]
+         ### Raw aliases — must stay unstandardized for (η, φ) coordinates
+         - [track_eta_raw, null]
+         - [track_phi_raw, null]
    pf_features:
       length: 2800
       pad_mode: wrap
       vars:
       ### [format 1]: var_name (no transformation)
+      ###   → with method: auto, computes median + IQR-based scale from data
       ### [format 2]: [var_name,
       ###              subtract_by(optional, default=None, no transf. if preprocess.method=manual, auto transf. if preprocess.method=auto),
       ###              multiply_by(optional, default=1),
       ###              clip_min(optional, default=-5),
       ###              clip_max(optional, default=5),
       ###              pad_value(optional, default=0)]
-         - [track_px, null]
-         - [track_py, null]
-         - [track_pz, null]
-         - [track_eta, null]
-         - [track_phi, null]
-         - [track_charge, null]
-         - [track_dxy_significance, null]
+      ###
+      ### Bare names (no explicit null) → auto mode computes standardization.
+      ### This is critical: features must be standardized so MSE loss is
+      ### scale-balanced (pz ~ 100 GeV vs charge ~ ±1 without normalization).
+         - track_px
+         - track_py
+         - track_pz
+         - track_eta
+         - track_phi
+         - track_charge
+         - track_dxy_significance
    pf_vectors:
       length: 2800
       pad_mode: wrap
       vars:
-         - [track_px, null]
-         - [track_py, null]
-         - [track_pz, null]
+         ### Raw aliases — must stay unstandardized for pairwise_lv_fts()
+         - [track_px_raw, null]
+         - [track_py_raw, null]
+         - [track_pz_raw, null]
          - [track_energy, null]
    pf_mask:
       length: 2800

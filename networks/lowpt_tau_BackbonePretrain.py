@@ -25,8 +25,6 @@ def get_model(data_config, **kwargs):
             dropout=0.0,
         ),
         mask_ratio=0.4,
-        loss_weight_features=1.0,
-        loss_weight_lorentz_vectors=0.5,
     )
     cfg.update(**kwargs)
     _logger.info('Model config: %s' % str(cfg))

@@ -655,7 +655,8 @@ def main():
     )
 
     total_steps = args.epochs * steps_per_epoch
-    warmup_steps = int(args.warmup_fraction * total_steps)
+    max_warmup_steps = 2000
+    warmup_steps = min(int(args.warmup_fraction * total_steps), max_warmup_steps)
     logger.info(
         f'LR schedule: {warmup_steps} warmup steps, '
         f'{total_steps} total steps'

@@ -57,6 +57,44 @@ from weaver.utils.dataset import SimpleIterDataset
 logger = logging.getLogger('pretrain_backbone')
 
 
+def trim_to_max_valid_tracks(
+    inputs: list[torch.Tensor],
+    mask_input_index: int,
+) -> list[torch.Tensor]:
+    """Trim padded tensors to the maximum number of valid tracks in the batch.
+
+    Weaver pads all events to a fixed sequence length (e.g. 2800) defined in
+    the YAML config. Most of this is padding zeros — median track count is
+    ~1130. This wastes GPU compute and, critically, corrupts BatchNorm
+    statistics (the input embedding's BN1d sees ~60-80% zeros).
+
+    This function finds the maximum number of valid tracks across the batch
+    using pf_mask, then slices all input tensors to that length. Since FPS,
+    kNN, and EdgeConv operate on variable-length point clouds, no architecture
+    changes are needed.
+
+    Args:
+        inputs: List of input tensors, each (B, C_i, P) where P is the padded
+            sequence length. Order follows data_config.input_names.
+        mask_input_index: Index of the pf_mask tensor in the inputs list.
+
+    Returns:
+        List of trimmed tensors, each (B, C_i, P_trimmed) where
+        P_trimmed = max valid tracks in the batch.
+    """
+    mask = inputs[mask_input_index]  # (B, 1, P)
+
+    # Sum over the sequence dimension to count valid tracks per event,
+    # then take the batch maximum. This is the tightest trim that
+    # preserves all real data in the batch.
+    max_valid_tracks = int(mask.sum(dim=2).max().item())
+
+    # Safety: ensure at least 1 track (handles empty-event edge case)
+    max_valid_tracks = max(1, max_valid_tracks)
+
+    return [tensor[:, :, :max_valid_tracks] for tensor in inputs]
+
+
 def build_experiment_directory(
     experiments_base: str,
     model_name: str,
@@ -220,6 +258,7 @@ def train_one_epoch(
     tensorboard_writer: SummaryWriter | None,
     global_batch_count: int,
     steps_per_epoch: int,
+    mask_input_index: int,
     grad_clip_max_norm: float = 1.0,
 ) -> tuple[float, int]:
     """Train for one epoch.
@@ -237,6 +276,8 @@ def train_one_epoch(
         global_batch_count: Running batch counter across epochs.
         steps_per_epoch: Maximum number of batches per epoch.
             SimpleIterDataset is infinite, so we must break manually.
+        mask_input_index: Index of pf_mask in the inputs list (from
+            data_config.input_names) for trim_to_max_valid_tracks().
         grad_clip_max_norm: Maximum gradient norm for clipping (0 to disable).
 
     Returns:
@@ -252,6 +293,19 @@ def train_one_epoch(
             break
 
         inputs = [X[k].to(device) for k in data_config.input_names]
+        padded_length = inputs[0].shape[2]
+
+        # Trim padding: slice all tensors to the max valid track count
+        # in this batch. Eliminates ~60-80% zero padding that corrupts
+        # BatchNorm and wastes GPU compute.
+        inputs = trim_to_max_valid_tracks(inputs, mask_input_index)
+
+        if batch_idx == 0:
+            trimmed_length = inputs[0].shape[2]
+            logger.info(
+                f'Epoch {epoch} | Trim: {padded_length} → {trimmed_length} '
+                f'({100 * (1 - trimmed_length / padded_length):.0f}% padding removed)'
+            )
 
         optimizer.zero_grad(set_to_none=True)
 
@@ -325,6 +379,7 @@ def validate(
     val_loader: DataLoader,
     device: torch.device,
     data_config,
+    mask_input_index: int,
     max_steps: int | None = None,
 ) -> float:
     """Validate on held-out data.
@@ -334,6 +389,8 @@ def validate(
         val_loader: Validation DataLoader.
         device: Target device.
         data_config: Weaver DataConfig for input name ordering.
+        mask_input_index: Index of pf_mask in the inputs list for
+            trim_to_max_valid_tracks().
         max_steps: Maximum number of validation batches.
             SimpleIterDataset is infinite, so we must limit manually.
             If None, runs until the loader is exhausted (unsafe for
@@ -352,6 +409,7 @@ def validate(
                 break
 
             inputs = [X[k].to(device) for k in data_config.input_names]
+            inputs = trim_to_max_valid_tracks(inputs, mask_input_index)
             per_event_loss = model(*inputs)
             total_loss += per_event_loss.mean().item()
             num_batches += 1
@@ -560,6 +618,10 @@ def main():
     logger.info(f'Model parameters: {num_params:,}')
     logger.info(f'Input names: {data_config.input_names}')
 
+    # Find the index of pf_mask in the input list for trim_to_max_valid_tracks()
+    mask_input_index = data_config.input_names.index('pf_mask')
+    logger.info(f'Mask input index: {mask_input_index} (pf_mask)')
+
     # Keep a reference to the original (uncompiled) model for state_dict access.
     # torch.compile wraps the module, so we need the original for clean
     # checkpoint saving and backbone weight extraction.
@@ -572,8 +634,10 @@ def main():
         and hasattr(torch, 'compile')
     )
     if use_compile:
-        logger.info('Compiling model with torch.compile (mode="default")...')
-        model = torch.compile(model, mode='default')
+        # dynamic=True: sequence length varies per batch after trim_to_max_valid_tracks(),
+        # so torch.compile must use symbolic shapes to avoid recompiling every batch.
+        logger.info('Compiling model with torch.compile (mode="default", dynamic=True)...')
+        model = torch.compile(model, mode='default', dynamic=True)
         logger.info('Model compiled.')
     else:
         logger.info('torch.compile disabled.')
@@ -631,6 +695,7 @@ def main():
             grad_scaler, device, data_config, epoch,
             tensorboard_writer, global_batch_count,
             steps_per_epoch=steps_per_epoch,
+            mask_input_index=mask_input_index,
             grad_clip_max_norm=args.grad_clip,
         )
         logger.info(f'Epoch {epoch} train loss: {train_loss:.5f}')
@@ -639,7 +704,8 @@ def main():
         # With 19K events, 20% val split, batch 128 → ~29 steps.
         val_steps = max(1, steps_per_epoch // 4)
         val_loss = validate(
-            model, val_loader, device, data_config, max_steps=val_steps
+            model, val_loader, device, data_config,
+            mask_input_index=mask_input_index, max_steps=val_steps,
         )
         logger.info(f'Epoch {epoch} val loss: {val_loss:.5f}')
 

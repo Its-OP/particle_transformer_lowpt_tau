@@ -40,14 +40,14 @@ preprocess:
 inputs:
    pf_points:
       length: 2800
-      pad_mode: wrap
+      pad_mode: constant
       vars:
          ### Raw aliases — must stay unstandardized for (η, φ) coordinates
          - [track_eta_raw, null]
          - [track_phi_raw, null]
    pf_features:
       length: 2800
-      pad_mode: wrap
+      pad_mode: constant
       vars:
       ### [format 1]: var_name (no transformation)
       ###   → with method: auto, computes median + IQR-based scale from data
@@ -70,7 +70,7 @@ inputs:
          - track_dxy_significance
    pf_vectors:
       length: 2800
-      pad_mode: wrap
+      pad_mode: constant
       vars:
          ### Raw aliases — must stay unstandardized for pairwise_lv_fts()
          - [track_px_raw, null]

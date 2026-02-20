@@ -45,7 +45,7 @@ DEVICE="cuda:0"
 # ~6× passes per epoch over 15.2K training events (19K × 0.8).
 # Each pass applies a different random mask, so the model sees each event
 # with ~6 different reconstruction objectives per epoch.
-STEPS_PER_EPOCH=500
+STEPS_PER_EPOCH=250
 
 # ---- Parse extra arguments ----
 # All extra arguments are passed directly to pretrain_backbone.py,

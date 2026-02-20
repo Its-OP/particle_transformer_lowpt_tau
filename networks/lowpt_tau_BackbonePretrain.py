@@ -20,7 +20,6 @@ def get_model(data_config, **kwargs):
         decoder_kwargs=dict(
             decoder_dim=128,
             num_heads=4,
-            num_self_attention_layers=2,
             num_output_features=len(data_config.input_dicts['pf_features']),
             dropout=0.0,
         ),

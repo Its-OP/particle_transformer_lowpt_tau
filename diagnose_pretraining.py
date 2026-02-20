@@ -168,8 +168,8 @@ def main():
         # ---- Stage 2: Masking ----
         print(f"\n--- MASKING ---")
         visible_mask, masked_mask = model._create_random_mask(mask)
-        num_visible = visible_mask.squeeze(1).sum(dim=1)
-        num_masked = masked_mask.squeeze(1).sum(dim=1)
+        num_visible = visible_mask.squeeze(1).sum(dim=1).float()
+        num_masked = masked_mask.squeeze(1).sum(dim=1).float()
         print(f"  Visible per event: mean={num_visible.mean().item():.0f}, "
               f"min={num_visible.min().item():.0f}")
         print(f"  Masked per event: mean={num_masked.mean().item():.0f}, "

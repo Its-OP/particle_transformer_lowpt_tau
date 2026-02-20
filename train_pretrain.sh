@@ -39,7 +39,7 @@ NETWORK="networks/lowpt_tau_BackbonePretrain.py"
 MODEL_NAME="BackbonePretrain"
 EXPERIMENTS_DIR="experiments"
 EPOCHS=100
-BATCH_SIZE=128
+BATCH_SIZE=64
 LEARNING_RATE=1e-3
 DEVICE="cuda:0"
 # ~6× passes per epoch over 15.2K training events (19K × 0.8).

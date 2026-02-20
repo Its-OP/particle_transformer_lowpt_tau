@@ -39,9 +39,13 @@ NETWORK="networks/lowpt_tau_BackbonePretrain.py"
 MODEL_NAME="BackbonePretrain"
 EXPERIMENTS_DIR="experiments"
 EPOCHS=100
-BATCH_SIZE=128
+BATCH_SIZE=192
 LEARNING_RATE=1e-3
 DEVICE="cuda:0"
+# ~6× passes per epoch over 15.2K training events (19K × 0.8).
+# Each pass applies a different random mask, so the model sees each event
+# with ~6 different reconstruction objectives per epoch.
+STEPS_PER_EPOCH=500
 
 # ---- Parse extra arguments ----
 # All extra arguments are passed directly to pretrain_backbone.py,
@@ -75,6 +79,7 @@ TRAIN_CMD="${CONDA_INIT} && cd ${SCRIPT_DIR} && python pretrain_backbone.py \
     --experiments-dir ${EXPERIMENTS_DIR} \
     --epochs ${EPOCHS} \
     --batch-size ${BATCH_SIZE} \
+    --steps-per-epoch ${STEPS_PER_EPOCH} \
     --lr ${LEARNING_RATE} \
     --device ${DEVICE} \
     --amp \
@@ -110,6 +115,7 @@ echo "Session:    ${SESSION_TRAIN} (training)"
 echo "            ${SESSION_GPU} (GPU monitor)"
 echo "Experiments: ${SCRIPT_DIR}/${EXPERIMENTS_DIR}/"
 echo "Epochs:     ${EPOCHS}"
+echo "Steps/epoch: ${STEPS_PER_EPOCH}"
 echo "Batch size: ${BATCH_SIZE}"
 echo "LR:         ${LEARNING_RATE}"
 echo "Device:     ${DEVICE}"

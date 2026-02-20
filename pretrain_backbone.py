@@ -219,6 +219,7 @@ def train_one_epoch(
     epoch: int,
     tensorboard_writer: SummaryWriter | None,
     global_batch_count: int,
+    steps_per_epoch: int,
     grad_clip_max_norm: float = 1.0,
 ) -> tuple[float, int]:
     """Train for one epoch.
@@ -234,6 +235,8 @@ def train_one_epoch(
         epoch: Current epoch number (for logging).
         tensorboard_writer: Optional TensorBoard SummaryWriter.
         global_batch_count: Running batch counter across epochs.
+        steps_per_epoch: Maximum number of batches per epoch.
+            SimpleIterDataset is infinite, so we must break manually.
         grad_clip_max_norm: Maximum gradient norm for clipping (0 to disable).
 
     Returns:
@@ -245,6 +248,9 @@ def train_one_epoch(
     start_time = time.time()
 
     for batch_idx, (X, y, _) in enumerate(train_loader):
+        if batch_idx >= steps_per_epoch:
+            break
+
         inputs = [X[k].to(device) for k in data_config.input_names]
 
         optimizer.zero_grad(set_to_none=True)
@@ -319,6 +325,7 @@ def validate(
     val_loader: DataLoader,
     device: torch.device,
     data_config,
+    max_steps: int | None = None,
 ) -> float:
     """Validate on held-out data.
 
@@ -327,6 +334,10 @@ def validate(
         val_loader: Validation DataLoader.
         device: Target device.
         data_config: Weaver DataConfig for input name ordering.
+        max_steps: Maximum number of validation batches.
+            SimpleIterDataset is infinite, so we must limit manually.
+            If None, runs until the loader is exhausted (unsafe for
+            infinite iterables).
 
     Returns:
         Average validation loss.
@@ -336,7 +347,10 @@ def validate(
     num_batches = 0
 
     with torch.no_grad():
-        for X, y, _ in val_loader:
+        for batch_idx, (X, y, _) in enumerate(val_loader):
+            if max_steps is not None and batch_idx >= max_steps:
+                break
+
             inputs = [X[k].to(device) for k in data_config.input_names]
             per_event_loss = model(*inputs)
             total_loss += per_event_loss.mean().item()
@@ -429,6 +443,11 @@ def main():
                         help='Enable mixed precision training')
     parser.add_argument('--no-compile', action='store_true',
                         help='Disable torch.compile (enabled by default on CUDA)')
+    parser.add_argument('--steps-per-epoch', type=int, default=None,
+                        help='Number of training batches per epoch. Required because '
+                             'SimpleIterDataset is infinite. Computed as '
+                             'floor(num_train_events / batch_size). If not set, '
+                             'defaults to 100 (likely wrong — set explicitly).')
     parser.add_argument('--save-every', type=int, default=10,
                         help='Save checkpoint every N epochs')
     parser.add_argument('--resume', type=str, default=None,
@@ -520,6 +539,18 @@ def main():
         persistent_workers=args.num_workers > 0,
     )
 
+    # ---- Steps per epoch ----
+    # SimpleIterDataset is an infinite IterableDataset — it never raises
+    # StopIteration. We must manually limit batches per epoch.
+    steps_per_epoch = args.steps_per_epoch
+    if steps_per_epoch is None:
+        steps_per_epoch = 100
+        logger.warning(
+            f'--steps-per-epoch not set, defaulting to {steps_per_epoch}. '
+            f'Set explicitly as floor(num_train_events / batch_size).'
+        )
+    logger.info(f'Steps per epoch: {steps_per_epoch}')
+
     # ---- Model ----
     network_module = load_network_module(args.network)
     model, model_info = network_module.get_model(data_config)
@@ -554,10 +585,12 @@ def main():
         weight_decay=args.weight_decay,
     )
 
-    # Estimate total steps (approximate — iterable dataset doesn't have len())
-    estimated_steps_per_epoch = 100  # will be refined after first epoch
-    total_steps = args.epochs * estimated_steps_per_epoch
+    total_steps = args.epochs * steps_per_epoch
     warmup_steps = int(args.warmup_fraction * total_steps)
+    logger.info(
+        f'LR schedule: {warmup_steps} warmup steps, '
+        f'{total_steps} total steps'
+    )
 
     scheduler = build_cosine_schedule_with_warmup(
         optimizer, warmup_steps, total_steps
@@ -597,11 +630,17 @@ def main():
             model, train_loader, optimizer, scheduler,
             grad_scaler, device, data_config, epoch,
             tensorboard_writer, global_batch_count,
+            steps_per_epoch=steps_per_epoch,
             grad_clip_max_norm=args.grad_clip,
         )
         logger.info(f'Epoch {epoch} train loss: {train_loss:.5f}')
 
-        val_loss = validate(model, val_loader, device, data_config)
+        # Validation steps: 20% of data / batch_size.
+        # With 19K events, 20% val split, batch 128 → ~29 steps.
+        val_steps = max(1, steps_per_epoch // 4)
+        val_loss = validate(
+            model, val_loader, device, data_config, max_steps=val_steps
+        )
         logger.info(f'Epoch {epoch} val loss: {val_loss:.5f}')
 
         current_lr = scheduler.get_last_lr()[0]

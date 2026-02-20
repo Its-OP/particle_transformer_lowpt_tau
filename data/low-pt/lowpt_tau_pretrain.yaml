@@ -1,6 +1,9 @@
 selection:
    ### use `&`, `|`, `~` for logical operations on numpy arrays
    ### can use functions from `math`, `np` (numpy), and `awkward` in the expression
+   ### Filter out events with 0 tracks — they cause NaN in FPS/kNN/max-pool.
+   ### ~10% of events have 0 tracks, likely minimum-bias or empty crossings.
+   event_n_tracks > 0
 
 new_variables:
    ### [format] name: formula

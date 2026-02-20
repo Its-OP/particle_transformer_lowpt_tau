@@ -1,7 +1,8 @@
 """Network wrapper for backbone pretraining.
 
 Used by the custom pretrain_backbone.py script (not weaver's training loop).
-Provides get_model() to construct the MaskedTrackPretrainer with default config.
+Provides get_model() to construct the MaskedTrackPretrainer with the
+two-stage Enrich-Compact backbone.
 """
 from weaver.nn.model.BackbonePretraining import MaskedTrackPretrainer
 from weaver.utils.logger import _logger
@@ -9,18 +10,34 @@ from weaver.utils.logger import _logger
 
 def get_model(data_config, **kwargs):
 
+    input_dim = len(data_config.input_dicts['pf_features'])
+
     cfg = dict(
         backbone_kwargs=dict(
-            input_dim=len(data_config.input_dicts['pf_features']),
-            embed_dim=64,
-            stage_output_points=[512, 256, 128],
-            stage_output_channels=[128, 192, 256],
-            stage_num_neighbors=[32, 24, 16],
+            input_dim=input_dim,
+            enrichment_kwargs=dict(
+                node_dim=32,
+                edge_dim=8,
+                num_neighbors=32,
+                edge_aggregation='attn8',
+                layer_params=[
+                    # (k, out_dim, reduction_dilation, message_dim)
+                    # 3× MultiScaleEdgeConv layers — identical to ParticleNeXt
+                    (32, 256, [(8, 1), (4, 1), (2, 1), (1, 1)], 64),
+                    (32, 256, [(8, 1), (4, 1), (2, 1), (1, 1)], 64),
+                    (32, 256, [(8, 1), (4, 1), (2, 1), (1, 1)], 64),
+                ],
+            ),
+            compaction_kwargs=dict(
+                stage_output_points=[256, 128],
+                stage_output_channels=[256, 256],
+                stage_num_neighbors=[16, 16],
+            ),
         ),
         decoder_kwargs=dict(
             decoder_dim=128,
             num_heads=4,
-            num_output_features=len(data_config.input_dicts['pf_features']),
+            num_output_features=input_dim,
             max_masked_tracks=1200,
             dropout=0.0,
         ),

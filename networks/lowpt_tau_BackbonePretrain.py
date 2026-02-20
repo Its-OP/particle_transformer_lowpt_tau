@@ -21,6 +21,7 @@ def get_model(data_config, **kwargs):
             decoder_dim=128,
             num_heads=4,
             num_output_features=len(data_config.input_dicts['pf_features']),
+            max_masked_tracks=1200,
             dropout=0.0,
         ),
         mask_ratio=0.4,

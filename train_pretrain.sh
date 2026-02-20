@@ -39,8 +39,9 @@ NETWORK="networks/lowpt_tau_BackbonePretrain.py"
 MODEL_NAME="BackbonePretrain"
 EXPERIMENTS_DIR="experiments"
 EPOCHS=100
-BATCH_SIZE=64
+BATCH_SIZE=48
 LEARNING_RATE=1e-3
+MASK_RATIO=0.15
 DEVICE="cuda:0"
 # ~6× passes per epoch over 15.2K training events (19K × 0.8).
 # Each pass applies a different random mask, so the model sees each event
@@ -81,6 +82,7 @@ TRAIN_CMD="${CONDA_INIT} && cd ${SCRIPT_DIR} && python pretrain_backbone.py \
     --batch-size ${BATCH_SIZE} \
     --steps-per-epoch ${STEPS_PER_EPOCH} \
     --lr ${LEARNING_RATE} \
+    --mask-ratio ${MASK_RATIO} \
     --device ${DEVICE} \
     --amp \
     ${EXTRA_ARGS}"
@@ -118,6 +120,7 @@ echo "Epochs:     ${EPOCHS}"
 echo "Steps/epoch: ${STEPS_PER_EPOCH}"
 echo "Batch size: ${BATCH_SIZE}"
 echo "LR:         ${LEARNING_RATE}"
+echo "Mask ratio: ${MASK_RATIO}"
 echo "Device:     ${DEVICE}"
 echo "AMP:        enabled"
 if [ -n "$EXTRA_ARGS" ]; then

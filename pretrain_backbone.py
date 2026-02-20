@@ -506,6 +506,8 @@ def main():
                              'SimpleIterDataset is infinite. Computed as '
                              'floor(num_train_events / batch_size). If not set, '
                              'defaults to 100 (likely wrong — set explicitly).')
+    parser.add_argument('--mask-ratio', type=float, default=None,
+                        help='Fraction of tracks to mask (overrides network config default)')
     parser.add_argument('--save-every', type=int, default=10,
                         help='Save checkpoint every N epochs')
     parser.add_argument('--resume', type=str, default=None,
@@ -611,7 +613,10 @@ def main():
 
     # ---- Model ----
     network_module = load_network_module(args.network)
-    model, model_info = network_module.get_model(data_config)
+    model_kwargs = {}
+    if args.mask_ratio is not None:
+        model_kwargs['mask_ratio'] = args.mask_ratio
+    model, model_info = network_module.get_model(data_config, **model_kwargs)
     model = model.to(device)
 
     num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)

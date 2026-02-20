@@ -39,14 +39,14 @@ NETWORK="networks/lowpt_tau_BackbonePretrain.py"
 MODEL_NAME="BackbonePretrain"
 EXPERIMENTS_DIR="experiments"
 EPOCHS=100
-BATCH_SIZE=48
-LEARNING_RATE=1e-3
-MASK_RATIO=0.15
+BATCH_SIZE=48 # 28.8 GB VRAM
+LEARNING_RATE=1e-2
+MASK_RATIO=0.25
 DEVICE="cuda:0"
 # ~6× passes per epoch over 15.2K training events (19K × 0.8).
 # Each pass applies a different random mask, so the model sees each event
 # with ~6 different reconstruction objectives per epoch.
-STEPS_PER_EPOCH=250
+STEPS_PER_EPOCH=500
 
 # ---- Parse extra arguments ----
 # All extra arguments are passed directly to pretrain_backbone.py,

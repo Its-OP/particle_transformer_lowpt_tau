@@ -22,7 +22,12 @@ def get_model(data_config, **kwargs):
                 edge_aggregation='attn8',
                 layer_params=[
                     # (k, out_dim, reduction_dilation, message_dim)
-                    # 3× MultiScaleEdgeConv layers — identical to ParticleNeXt
+                    # 5× MultiScaleEdgeConv layers — deeper than ParticleNeXt's 3
+                    # to compensate for ~10× more particles (~1130 vs ~30-150).
+                    # 5-hop receptive field covers more of the particle cloud
+                    # before compaction discards spatial resolution.
+                    (32, 256, [(8, 1), (4, 1), (2, 1), (1, 1)], 64),
+                    (32, 256, [(8, 1), (4, 1), (2, 1), (1, 1)], 64),
                     (32, 256, [(8, 1), (4, 1), (2, 1), (1, 1)], 64),
                     (32, 256, [(8, 1), (4, 1), (2, 1), (1, 1)], 64),
                     (32, 256, [(8, 1), (4, 1), (2, 1), (1, 1)], 64),

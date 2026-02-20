@@ -13,7 +13,7 @@ def get_model(data_config, **kwargs):
         backbone_kwargs=dict(
             input_dim=len(data_config.input_dicts['pf_features']),
             embed_dim=64,
-            stage_output_points=[256, 128, 64],
+            stage_output_points=[512, 256, 128],
             stage_output_channels=[128, 192, 256],
             stage_num_neighbors=[32, 24, 16],
         ),

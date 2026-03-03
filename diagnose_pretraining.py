@@ -1,13 +1,18 @@
-"""Diagnostic script to identify whether encoder or decoder is broken.
+"""Diagnostic script for the Enrich-Compact backbone pretraining.
 
 Runs a single forward pass through MaskedTrackPretrainer and prints
 activation statistics at every stage:
   - Input features (after standardization by weaver)
-  - After input embedding + BN
-  - After each SetAbstraction stage
-  - Backbone output tokens
-  - Decoder cross-attention output
-  - Decoder final predictions vs ground truth
+  - Enrichment: node encoding → each MultiScaleEdgeConv layer → enriched
+  - Masking split
+  - Compaction: each CompactionStage → backbone tokens
+  - Decoder: cross-attention → predictions vs ground truth
+
+Additional diagnostic modes:
+  --test-backbone-bypass: Replaces backbone tokens with random noise
+      and compares loss. If the loss barely changes, the decoder is
+      solving the task from positional encoding alone (bypassing the
+      backbone). This is the key test for decoder shortcut detection.
 
 Usage:
     python diagnose_pretraining.py \
@@ -16,6 +21,16 @@ Usage:
         --network networks/lowpt_tau_BackbonePretrain.py \
         --batch-size 32 \
         --device cuda:0
+
+    # Test backbone bypass (requires --checkpoint of a trained model):
+    python diagnose_pretraining.py \
+        --data-config data/low-pt/lowpt_tau_pretrain.yaml \
+        --data-dir data/low-pt/ \
+        --network networks/lowpt_tau_BackbonePretrain.py \
+        --batch-size 32 \
+        --device cpu \
+        --checkpoint path/to/checkpoint.pt \
+        --test-backbone-bypass
 """
 import argparse
 import importlib.util
@@ -66,8 +81,10 @@ def tensor_stats(tensor: torch.Tensor, name: str, mask: torch.Tensor | None = No
 def check_token_diversity(tokens: torch.Tensor, name: str):
     """Check if tokens are diverse or collapsed to near-constant."""
     # tokens: (B, C, N)
-    # Cosine similarity between all pairs of tokens within each event
     batch_size, channels, num_tokens = tokens.shape
+    if num_tokens < 2:
+        print(f"  {name} token diversity: only {num_tokens} token(s), skipping")
+        return
     tokens_normed = torch.nn.functional.normalize(tokens.float(), dim=1)  # (B, C, N)
     # Pairwise cosine sim: (B, N, N)
     cosine_similarity = torch.bmm(tokens_normed.transpose(1, 2), tokens_normed)
@@ -82,6 +99,202 @@ def check_token_diversity(tokens: torch.Tensor, name: str):
     )
 
 
+def compute_loss_with_backbone_tokens(
+    model,
+    backbone_tokens: torch.Tensor,
+    features: torch.Tensor,
+    masked_mask: torch.Tensor,
+    num_masked_per_event: torch.Tensor,
+    max_masked: int,
+) -> float:
+    """Run the decoder with given backbone tokens and compute MSE loss.
+
+    Args:
+        model: MaskedTrackPretrainer instance.
+        backbone_tokens: (B, C_backbone, M) tokens to feed to decoder.
+        features: (B, F, P) standardized track features.
+        masked_mask: (B, 1, P) mask indicating which tracks were masked.
+        num_masked_per_event: (B,) count of masked tracks per event.
+        max_masked: Maximum number of masked tracks in this batch.
+
+    Returns:
+        Scalar loss value (averaged over batch).
+    """
+    device = features.device
+
+    # Gather ground truth for masked tracks
+    masked_true_features, masked_validity = model._gather_tracks(
+        features, masked_mask, max_masked
+    )
+
+    # Run decoder
+    predicted_features = model.decoder(backbone_tokens, max_masked)
+
+    # Per-event MSE loss: L = (1 / N_masked / F) * Σ (pred - true)²
+    track_valid = masked_validity.float()
+    feature_error = (predicted_features - masked_true_features).square() * track_valid
+    per_event_loss = feature_error.sum(dim=(1, 2)) / (
+        num_masked_per_event.float() * features.shape[1]
+    ).clamp(min=1.0)
+
+    return per_event_loss.mean().item()
+
+
+def test_backbone_bypass(
+    model,
+    loader: DataLoader,
+    data_config,
+    mask_input_index: int,
+    device: torch.device,
+    num_batches: int = 10,
+):
+    """Test whether the decoder bypasses the backbone.
+
+    For each batch, computes loss in three conditions:
+      1. Normal: real backbone tokens from the trained model
+      2. Random noise: backbone tokens replaced with Gaussian noise
+         matched in mean/std to the real tokens
+      3. Zeros: backbone tokens replaced with all zeros
+
+    If loss barely changes between conditions, the decoder is solving the
+    task from positional encoding + self-attention alone.
+    """
+    model.eval()
+
+    losses_normal = []
+    losses_random = []
+    losses_zeros = []
+    losses_zero_pred = []
+
+    print(f"\n{'='*70}")
+    print("BACKBONE BYPASS TEST")
+    print(f"{'='*70}")
+    print(f"Averaging over {num_batches} batches...")
+
+    with torch.no_grad():
+        for batch_idx, (X, y, _) in enumerate(loader):
+            if batch_idx >= num_batches:
+                break
+
+            inputs = [X[k].to(device) for k in data_config.input_names]
+
+            # Trim padding
+            mask_tensor = inputs[mask_input_index]
+            max_valid = int(mask_tensor.sum(dim=2).max().item())
+            max_valid = max(1, max_valid)
+            inputs = [tensor[:, :, :max_valid] for tensor in inputs]
+
+            points, features, lorentz_vectors, mask = inputs
+
+            # Step 1: Enrich all tracks
+            enriched = model.backbone.enrich(
+                points, features, lorentz_vectors, mask,
+            )
+
+            # Step 2: Create masking split (same for all conditions)
+            visible_mask, masked_mask = model._create_random_mask(mask)
+            num_visible_per_event = visible_mask.squeeze(1).sum(dim=1)
+            num_masked_per_event = masked_mask.squeeze(1).sum(dim=1).float()
+            max_visible = int(num_visible_per_event.max().item())
+            max_masked = int(num_masked_per_event.max().item())
+
+            if max_masked == 0:
+                continue
+
+            # Step 3: Gather visible tracks
+            visible_enriched, visible_validity = model._gather_tracks(
+                enriched, visible_mask, max_visible,
+            )
+            visible_coordinates, _ = model._gather_tracks(
+                points, visible_mask, max_visible,
+            )
+
+            # Step 4: Compact
+            backbone_tokens, _ = model.backbone.compact(
+                visible_coordinates, visible_enriched, visible_validity,
+            )
+
+            # Condition 1: Normal (real backbone tokens)
+            loss_normal = compute_loss_with_backbone_tokens(
+                model, backbone_tokens, features,
+                masked_mask, num_masked_per_event, max_masked,
+            )
+            losses_normal.append(loss_normal)
+
+            # Condition 2: Random noise (matched statistics)
+            random_tokens = torch.randn_like(backbone_tokens)
+            random_tokens = (
+                random_tokens * backbone_tokens.std() + backbone_tokens.mean()
+            )
+            loss_random = compute_loss_with_backbone_tokens(
+                model, random_tokens, features,
+                masked_mask, num_masked_per_event, max_masked,
+            )
+            losses_random.append(loss_random)
+
+            # Condition 3: All zeros
+            zero_tokens = torch.zeros_like(backbone_tokens)
+            loss_zeros = compute_loss_with_backbone_tokens(
+                model, zero_tokens, features,
+                masked_mask, num_masked_per_event, max_masked,
+            )
+            losses_zeros.append(loss_zeros)
+
+            # Baseline: zero-prediction loss (predict all zeros)
+            masked_true_features, masked_validity = model._gather_tracks(
+                features, masked_mask, max_masked,
+            )
+            track_valid = masked_validity.float()
+            zero_pred_error = masked_true_features.square() * track_valid
+            zero_pred_loss = zero_pred_error.sum(dim=(1, 2)) / (
+                num_masked_per_event.float() * features.shape[1]
+            ).clamp(min=1.0)
+            losses_zero_pred.append(zero_pred_loss.mean().item())
+
+            if batch_idx % 5 == 0:
+                print(f"  Batch {batch_idx}: normal={loss_normal:.4f}, "
+                      f"random={loss_random:.4f}, zeros={loss_zeros:.4f}")
+
+    # Compute averages
+    avg_normal = sum(losses_normal) / len(losses_normal)
+    avg_random = sum(losses_random) / len(losses_random)
+    avg_zeros = sum(losses_zeros) / len(losses_zeros)
+    avg_zero_pred = sum(losses_zero_pred) / len(losses_zero_pred)
+
+    print(f"\n--- RESULTS (averaged over {len(losses_normal)} batches) ---")
+    print(f"  Zero-prediction baseline:     {avg_zero_pred:.4f}")
+    print(f"  Normal (real backbone):        {avg_normal:.4f}")
+    print(f"  Random noise backbone:         {avg_random:.4f}")
+    print(f"  Zero backbone:                 {avg_zeros:.4f}")
+
+    # Interpretation
+    normal_vs_random_delta = avg_random - avg_normal
+    normal_vs_random_pct = 100 * normal_vs_random_delta / avg_normal
+
+    print(f"\n--- INTERPRETATION ---")
+    print(f"  Loss increase (normal -> random): "
+          f"{normal_vs_random_delta:+.4f} ({normal_vs_random_pct:+.1f}%)")
+    print(f"  Loss increase (normal -> zeros):  "
+          f"{avg_zeros - avg_normal:+.4f} "
+          f"({100 * (avg_zeros - avg_normal) / avg_normal:+.1f}%)")
+
+    if abs(normal_vs_random_pct) < 5:
+        print(f"\n  WARNING: BACKBONE BYPASS DETECTED: Loss barely changes when "
+              f"backbone tokens are replaced with noise.")
+        print(f"  The decoder is not extracting meaningful information "
+              f"from the backbone tokens.")
+        print(f"  If model is freshly initialized, this is expected — "
+              f"train longer and re-test.")
+    elif abs(normal_vs_random_pct) < 15:
+        print(f"\n  WARNING: PARTIAL BYPASS: Backbone contributes some information, "
+              f"but the decoder can mostly function without it.")
+    else:
+        print(f"\n  OK: Backbone is providing meaningful information to the "
+              f"decoder ({normal_vs_random_pct:+.1f}% loss increase without it).")
+
+    print(f"\n{'='*70}")
+
+
 def main():
     parser = argparse.ArgumentParser(description='Diagnose pretraining pipeline')
     parser.add_argument('--data-config', type=str, required=True)
@@ -91,6 +304,11 @@ def main():
     parser.add_argument('--device', type=str, default='cuda:0')
     parser.add_argument('--checkpoint', type=str, default=None,
                         help='Optional checkpoint to load (diagnoses trained model)')
+    parser.add_argument('--test-backbone-bypass', action='store_true',
+                        help='Test whether the decoder bypasses the backbone')
+    parser.add_argument('--num-batches', type=int, default=10,
+                        help='Number of batches for backbone bypass test '
+                             '(averaged for stable estimates). Default: 10.')
     args = parser.parse_args()
 
     device = torch.device(args.device)
@@ -137,7 +355,7 @@ def main():
     points, features, lorentz_vectors, mask = inputs
 
     print(f"\n{'='*70}")
-    print("DIAGNOSTIC: Pretraining Pipeline Analysis")
+    print("DIAGNOSTIC: Enrich-Compact Pretraining Pipeline")
     print(f"{'='*70}")
     print(f"Batch size: {features.shape[0]}")
     print(f"Sequence length (after trim): {features.shape[2]}")
@@ -145,14 +363,14 @@ def main():
           f"max={mask.sum(dim=2).max().item():.0f}, "
           f"mean={mask.sum(dim=2).mean().item():.0f}")
 
-    # ---- Stage 1: Input data ----
+    # ---- Input data ----
     print(f"\n--- INPUT DATA ---")
     tensor_stats(features, "pf_features (standardized)", mask)
     tensor_stats(lorentz_vectors, "pf_vectors (raw)", mask)
     tensor_stats(points, "pf_points (eta, phi)", mask)
 
-    # Check per-feature stats
-    print("\n  Per-feature statistics (masked valid tracks only):")
+    # Per-feature stats
+    print("\n  Per-feature statistics (valid tracks only):")
     flat_mask = mask.squeeze(1).bool()  # (B, P)
     for feature_index in range(features.shape[1]):
         feature_values = features[:, feature_index, :][flat_mask]
@@ -165,134 +383,264 @@ def main():
         )
 
     with torch.no_grad():
-        # ---- Stage 2: Masking ----
-        print(f"\n--- MASKING ---")
+        backbone = model.backbone
+
+        # ---- ENRICHMENT STAGE ----
+        print(f"\n{'='*70}")
+        print("STAGE 1: ENRICHMENT (ParticleNeXt MultiScaleEdgeConv)")
+        print(f"{'='*70}")
+
+        boolean_mask = mask.bool()
+        null_positions = ~boolean_mask
+
+        # Static graph computation (mirrors backbone.enrich logic)
+        points_for_knn = points.clone()
+        points_for_knn.masked_fill_(null_positions, 1e9)
+
+        knn_indices = backbone.enrichment_knn(points_for_knn)
+        print(f"  kNN indices: shape={list(knn_indices.shape)}")
+
+        edge_inputs, _, lvs_neighbors, null_edge_positions = (
+            backbone.enrichment_get_graph_feature(
+                lvs=lorentz_vectors,
+                mask=boolean_mask,
+                edges=None,
+                idx=knn_indices,
+                null_edge_pos=None,
+            )
+        )
+        tensor_stats(edge_inputs, "pairwise LV edge features")
+
+        # Node encoding
+        features_4d = features.unsqueeze(-1)
+        encoded_features = backbone.node_encode(features_4d)
+        tensor_stats(
+            encoded_features.squeeze(-1), "node_encode output",
+            mask
+        )
+
+        # Edge encoding
+        encoded_edges = backbone.edge_encode(edge_inputs)
+        tensor_stats(encoded_edges, "edge_encode output")
+
+        # Each MultiScaleEdgeConv layer
+        current_features = encoded_features
+        for layer_index, layer in enumerate(backbone.enrichment_layers):
+            _, current_features = layer(
+                points=points_for_knn,
+                features=current_features,
+                lorentz_vectors=lorentz_vectors,
+                mask=boolean_mask,
+                edges=None,
+                idx=knn_indices,
+                null_edge_pos=null_edge_positions,
+                edge_inputs=encoded_edges,
+                lvs_ngbs=lvs_neighbors,
+            )
+            layer_output = current_features.squeeze(-1)
+            print(f"\n  --- MultiScaleEdgeConv layer {layer_index} ---")
+            tensor_stats(layer_output, f"  layer_{layer_index} output", mask)
+            check_token_diversity(
+                layer_output[:, :, :min(256, layer_output.shape[2])],
+                f"  layer_{layer_index} (first 256 tracks)"
+            )
+            # LayerScale gamma
+            print(f"    gamma: {layer.gamma.data.mean().item():.6f} "
+                  f"(init_scale=1e-5, growth indicates learning)")
+
+        # Post-enrichment
+        enriched = backbone.enrichment_post(current_features).squeeze(-1)
+        enriched = enriched * mask.float()
+        print(f"\n  --- Enriched output ---")
+        tensor_stats(enriched, "enriched_features", mask)
+        check_token_diversity(
+            enriched[:, :, :min(256, enriched.shape[2])],
+            "enriched (first 256 tracks)"
+        )
+
+        # ---- MASKING ----
+        print(f"\n{'='*70}")
+        print("MASKING")
+        print(f"{'='*70}")
         visible_mask, masked_mask = model._create_random_mask(mask)
         num_visible = visible_mask.squeeze(1).sum(dim=1).float()
         num_masked = masked_mask.squeeze(1).sum(dim=1).float()
+        max_visible = int(num_visible.max().item())
+        max_masked = int(num_masked.max().item())
         print(f"  Visible per event: mean={num_visible.mean().item():.0f}, "
               f"min={num_visible.min().item():.0f}")
         print(f"  Masked per event: mean={num_masked.mean().item():.0f}, "
               f"min={num_masked.min().item():.0f}")
 
-        # ---- Stage 3: Input embedding ----
-        print(f"\n--- BACKBONE: Input Embedding ---")
-        visible_features = features * visible_mask.float()
-        visible_lorentz_vectors = lorentz_vectors * visible_mask.float()
-        visible_points = points * visible_mask.float()
+        # Gather visible tracks
+        visible_enriched, visible_validity = model._gather_tracks(
+            enriched, visible_mask, max_visible,
+        )
+        visible_coordinates, _ = model._gather_tracks(
+            points, visible_mask, max_visible,
+        )
+        print(f"  Gathered visible: {list(visible_enriched.shape)}, "
+              f"validity: {visible_validity.sum().item():.0f}/{visible_validity.numel()} slots")
 
-        backbone = model.backbone
-        embedded = backbone.input_embedding(visible_features) * visible_mask.float()
-        tensor_stats(embedded, "after embed+BN+ReLU", visible_mask)
-        check_token_diversity(embedded, "embedded")
+        # ---- COMPACTION STAGE ----
+        print(f"\n{'='*70}")
+        print("STAGE 2: COMPACTION (PointNet++ Set Abstraction)")
+        print(f"{'='*70}")
 
-        # ---- Stage 4: Each SetAbstraction stage ----
-        current_features = embedded
-        current_lv = visible_lorentz_vectors
-        current_points = visible_points
-        current_mask = visible_mask.float()
+        current_compact_features = visible_enriched
+        current_compact_coordinates = visible_coordinates
+        current_compact_mask = visible_validity
 
-        for stage_index, stage in enumerate([backbone.stage1, backbone.stage2, backbone.stage3], 1):
-            print(f"\n--- BACKBONE: Stage {stage_index} ---")
-            current_features, current_lv, current_points, current_mask = stage(
-                current_points, current_features, current_lv, current_mask
+        for stage_index, stage in enumerate(backbone.compaction_stages):
+            print(f"\n  --- CompactionStage {stage_index} ---")
+            print(f"    Input: {list(current_compact_features.shape)}")
+            current_compact_features, current_compact_coordinates, current_compact_mask = stage(
+                current_compact_coordinates, current_compact_features,
+                current_compact_mask,
             )
-            tensor_stats(current_features, f"stage{stage_index} features")
-            check_token_diversity(current_features, f"stage{stage_index}")
-            tensor_stats(current_lv, f"stage{stage_index} lorentz_vectors")
+            tensor_stats(current_compact_features, f"  stage_{stage_index} output")
+            check_token_diversity(current_compact_features, f"  stage_{stage_index}")
+            print(f"    Output points: {current_compact_features.shape[2]}")
 
-        backbone_tokens = current_features
-        print(f"\n--- BACKBONE OUTPUT ---")
+        backbone_tokens = current_compact_features
+        print(f"\n  --- Backbone output tokens ---")
         tensor_stats(backbone_tokens, "backbone_tokens (final)")
         check_token_diversity(backbone_tokens, "backbone_tokens")
 
-        # ---- Stage 5: Decoder ----
-        print(f"\n--- DECODER ---")
-        max_masked = num_masked.max().item()
-        masked_coordinates = model._gather_masked_tracks(
-            points, masked_mask, max_masked
-        )
-        masked_true_features = model._gather_masked_tracks(
-            features, masked_mask, max_masked
+        # ---- DECODER ----
+        print(f"\n{'='*70}")
+        print("DECODER")
+        print(f"{'='*70}")
+
+        # Gather ground truth
+        masked_true_features, masked_validity = model._gather_tracks(
+            features, masked_mask, max_masked,
         )
 
         decoder = model.decoder
+        batch_size = backbone_tokens.shape[0]
 
-        # Project backbone tokens
-        memory = decoder.backbone_projection(backbone_tokens.transpose(1, 2))
-        tensor_stats(memory, "decoder memory (projected backbone)")
+        # Project backbone tokens + LayerNorm
+        memory = decoder.memory_norm(
+            decoder.backbone_projection(backbone_tokens.transpose(1, 2))
+        )
+        tensor_stats(memory, "decoder memory (projected + normed)")
 
         # Build queries
-        batch_size = backbone_tokens.shape[0]
-        queries = decoder.mask_token.expand(batch_size, -1, max_masked)
-        position_encoding = decoder.positional_encoding(masked_coordinates)
-        queries = queries + position_encoding
-        queries = queries.transpose(1, 2)  # (B, N_masked, D)
-        tensor_stats(queries, "decoder queries (mask_token + pos_enc)")
+        query_indices = torch.arange(max_masked, device=device)
+        queries = decoder.query_norm(
+            decoder.query_embeddings(query_indices)
+        )
+        queries = queries.unsqueeze(0).expand(batch_size, -1, -1)
+        tensor_stats(queries, "decoder queries (learned + normed)")
+
+        check_token_diversity(
+            queries[0].unsqueeze(0).transpose(1, 2), "query_embeddings"
+        )
 
         # Cross-attention
         cross_attention_output, cross_attention_weights = decoder.cross_attention(
             query=queries, key=memory, value=memory
         )
         tensor_stats(cross_attention_output, "cross_attention output")
+        num_keys = cross_attention_weights.shape[-1]
+        entropy = -(cross_attention_weights * (cross_attention_weights + 1e-8).log()).sum(dim=-1).mean().item()
+        uniform_entropy = torch.tensor(float(num_keys)).log().item()
         print(f"  cross_attention_weights: shape={list(cross_attention_weights.shape)}, "
-              f"entropy={-(cross_attention_weights * (cross_attention_weights + 1e-8).log()).sum(dim=-1).mean().item():.4f} "
-              f"(uniform={torch.tensor(64.0).log().item():.4f})")
+              f"entropy={entropy:.4f} "
+              f"(uniform={uniform_entropy:.4f}, "
+              f"ratio={entropy / uniform_entropy:.4f})")
 
         queries = decoder.cross_attention_norm(queries + cross_attention_output)
         tensor_stats(queries, "after cross_attention + layernorm")
 
-        # Self-attention layers
-        for layer_index, (self_attention, self_attention_norm, feedforward, feedforward_norm) in enumerate(
-            zip(decoder.self_attention_layers, decoder.self_attention_norms,
-                decoder.feedforward_layers, decoder.feedforward_norms)
-        ):
-            self_attention_output, _ = self_attention(queries, queries, queries)
-            queries = self_attention_norm(queries + self_attention_output)
-            feedforward_output = feedforward(queries)
-            queries = feedforward_norm(queries + feedforward_output)
-            tensor_stats(queries, f"after self_attention_layer[{layer_index}]")
-
-        # Output projection
-        predictions = decoder.output_projection(queries).transpose(1, 2)
+        # Output MLP
+        predictions = decoder.output_mlp(queries).transpose(1, 2)
         tensor_stats(predictions, "decoder predictions")
         tensor_stats(masked_true_features, "ground truth (masked features)")
 
-        # ---- Stage 6: Loss analysis ----
-        print(f"\n--- LOSS ANALYSIS ---")
-        # Build validity mask for gathered dense tensor
-        track_valid = torch.zeros(batch_size, 1, max_masked, device=device)
-        for batch_idx in range(batch_size):
-            track_valid[batch_idx, :, :num_masked[batch_idx].long()] = 1.0
+        # Check query output diversity
+        check_token_diversity(predictions, "prediction")
+
+        # ---- LOSS ANALYSIS ----
+        print(f"\n{'='*70}")
+        print("LOSS ANALYSIS")
+        print(f"{'='*70}")
+        track_valid = masked_validity.float()
 
         error = (predictions - masked_true_features).square() * track_valid
         per_feature_mse = error.sum(dim=2) / num_masked.unsqueeze(1).clamp(min=1.0)
         print("  Per-feature MSE (averaged over events):")
         for feature_index in range(per_feature_mse.shape[1]):
-            print(f"    feature[{feature_index}]: {per_feature_mse[:, feature_index].mean().item():.4f}")
+            print(f"    feature[{feature_index}]: "
+                  f"{per_feature_mse[:, feature_index].mean().item():.4f}")
 
-        total_loss = error.sum(dim=(1, 2)) / (num_masked * features.shape[1]).clamp(min=1.0)
+        total_loss = error.sum(dim=(1, 2)) / (
+            num_masked * features.shape[1]
+        ).clamp(min=1.0)
         print(f"\n  Total loss: {total_loss.mean().item():.4f}")
 
-        # Baseline: what would zero-prediction give?
+        # Baselines
         zero_error = masked_true_features.square() * track_valid
-        zero_loss = zero_error.sum(dim=(1, 2)) / (num_masked * features.shape[1]).clamp(min=1.0)
+        zero_loss = zero_error.sum(dim=(1, 2)) / (
+            num_masked * features.shape[1]
+        ).clamp(min=1.0)
         print(f"  Zero-prediction baseline: {zero_loss.mean().item():.4f}")
 
-        # Baseline: mean-prediction (predict batch mean per feature)
-        mean_per_feature = (masked_true_features * track_valid).sum(dim=2) / num_masked.unsqueeze(1).clamp(min=1.0)
-        mean_prediction = mean_per_feature.unsqueeze(2).expand_as(masked_true_features)
-        mean_error = (mean_prediction - masked_true_features).square() * track_valid
-        mean_loss = mean_error.sum(dim=(1, 2)) / (num_masked * features.shape[1]).clamp(min=1.0)
+        mean_per_feature = (
+            (masked_true_features * track_valid).sum(dim=2) /
+            num_masked.unsqueeze(1).clamp(min=1.0)
+        )
+        mean_prediction = mean_per_feature.unsqueeze(2).expand_as(
+            masked_true_features
+        )
+        mean_error = (
+            (mean_prediction - masked_true_features).square() * track_valid
+        )
+        mean_loss = mean_error.sum(dim=(1, 2)) / (
+            num_masked * features.shape[1]
+        ).clamp(min=1.0)
         print(f"  Mean-prediction baseline: {mean_loss.mean().item():.4f}")
 
-        # Check: are predictions near-zero?
-        pred_valid = predictions * track_valid
+        # Per-feature correlation between predictions and ground truth
+        print("\n  Per-feature prediction-GT correlation:")
+        for feature_index in range(features.shape[1]):
+            pred_feature = predictions[:, feature_index, :][
+                track_valid.squeeze(1).bool()
+            ]
+            gt_feature = masked_true_features[:, feature_index, :][
+                track_valid.squeeze(1).bool()
+            ]
+            if pred_feature.numel() > 1:
+                correlation = torch.corrcoef(
+                    torch.stack([pred_feature, gt_feature])
+                )[0, 1].item()
+                print(f"    feature[{feature_index}]: r={correlation:.4f}")
+
+        # Prediction stats
+        valid_predictions = predictions[
+            track_valid.expand_as(predictions).bool()
+        ]
         print(f"\n  Prediction stats (valid positions only):")
-        valid_predictions = predictions[track_valid.expand_as(predictions).bool()]
         print(f"    mean={valid_predictions.mean().item():.4f}, "
               f"std={valid_predictions.std().item():.4f}, "
               f"abs_mean={valid_predictions.abs().mean().item():.4f}")
+        gt_valid = masked_true_features[
+            track_valid.expand_as(masked_true_features).bool()
+        ]
+        print(f"  GT stats (valid positions only):")
+        print(f"    mean={gt_valid.mean().item():.4f}, "
+              f"std={gt_valid.std().item():.4f}")
+        print(f"  Pred/GT std ratio: "
+              f"{valid_predictions.std().item() / gt_valid.std().item():.4f}")
+
+    # ---- Optional: Backbone bypass test ----
+    if args.test_backbone_bypass:
+        loader = DataLoader(dataset, batch_size=args.batch_size, drop_last=True)
+        test_backbone_bypass(
+            model, loader, data_config, mask_input_index, device,
+            num_batches=args.num_batches,
+        )
 
     print(f"\n{'='*70}")
     print("DONE")

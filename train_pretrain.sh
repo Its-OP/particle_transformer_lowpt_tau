@@ -42,6 +42,9 @@ EPOCHS=100
 BATCH_SIZE=48 # 28.8 GB VRAM
 LEARNING_RATE=1e-2
 MASK_RATIO=0.25
+PLATEAU_FACTOR=0.5
+PLATEAU_PATIENCE=5
+NUM_ENRICHMENT_LAYERS=5
 DEVICE="cuda:0"
 # ~6× passes per epoch over 15.2K training events (19K × 0.8).
 # Each pass applies a different random mask, so the model sees each event
@@ -83,6 +86,9 @@ TRAIN_CMD="${CONDA_INIT} && cd ${SCRIPT_DIR} && python pretrain_backbone.py \
     --steps-per-epoch ${STEPS_PER_EPOCH} \
     --lr ${LEARNING_RATE} \
     --mask-ratio ${MASK_RATIO} \
+    --plateau-factor ${PLATEAU_FACTOR} \
+    --plateau-patience ${PLATEAU_PATIENCE} \
+    --num-enrichment-layers ${NUM_ENRICHMENT_LAYERS} \
     --device ${DEVICE} \
     --amp \
     ${EXTRA_ARGS}"
@@ -121,6 +127,8 @@ echo "Steps/epoch: ${STEPS_PER_EPOCH}"
 echo "Batch size: ${BATCH_SIZE}"
 echo "LR:         ${LEARNING_RATE}"
 echo "Mask ratio: ${MASK_RATIO}"
+echo "Plateau:    factor=${PLATEAU_FACTOR}, patience=${PLATEAU_PATIENCE}"
+echo "Enrichment: ${NUM_ENRICHMENT_LAYERS} layers"
 echo "Device:     ${DEVICE}"
 echo "AMP:        enabled"
 if [ -n "$EXTRA_ARGS" ]; then

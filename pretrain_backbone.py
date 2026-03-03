@@ -41,7 +41,6 @@ import argparse
 import importlib.util
 import json
 import logging
-import math
 import os
 import sys
 import time
@@ -214,43 +213,120 @@ def load_network_module(network_path: str):
     return module
 
 
-def build_cosine_schedule_with_warmup(
-    optimizer: torch.optim.Optimizer,
-    num_warmup_steps: int,
-    num_training_steps: int,
-) -> torch.optim.lr_scheduler.LambdaLR:
-    """Cosine annealing with linear warmup.
+class WarmupThenPlateauScheduler:
+    """Two-phase LR scheduler: linear warmup → ReduceLROnPlateau.
 
-    Learning rate schedule:
-        - Linear warmup: lr scales from 0 to base_lr over num_warmup_steps
-        - Cosine decay: lr follows cos(π × progress / 2) from base_lr to 0
+    Phase 1 (warmup): LR scales linearly from 0 to base_lr over
+        num_warmup_steps. Called per training step via step_batch().
+
+    Phase 2 (plateau): LR is reduced by `factor` when val_loss plateaus
+        for `patience` epochs. Called per epoch via step_epoch(val_loss).
+
+    With masked track reconstruction the effective training set is
+    combinatorially infinite (random masking), so the model never overfits.
+    Performance plateaus come from parameter saturation, not memorisation.
+    ReduceLROnPlateau keeps the LR high while the model is still improving
+    and only reduces when genuinely stuck — unlike cosine annealing which
+    decays unconditionally on a fixed schedule.
 
     Args:
-        optimizer: Optimizer to schedule.
-        num_warmup_steps: Number of warmup steps.
-        num_training_steps: Total number of training steps.
-
-    Returns:
-        LambdaLR scheduler.
+        optimizer: Optimizer whose LR will be controlled.
+        num_warmup_steps: Number of linear warmup steps.
+        plateau_factor: Multiplicative factor for LR reduction (default 0.5).
+        plateau_patience: Number of epochs with no improvement before
+            reducing LR (default 5).
+        min_lr: Lower bound on the learning rate (default 1e-6).
     """
-    def lr_lambda(current_step: int) -> float:
-        if current_step < num_warmup_steps:
-            # Linear warmup: 0 → 1
-            return current_step / max(1, num_warmup_steps)
-        # Cosine decay: 1 → 0
-        progress = (current_step - num_warmup_steps) / max(
-            1, num_training_steps - num_warmup_steps
-        )
-        return max(0.0, 0.5 * (1.0 + math.cos(math.pi * progress)))
 
-    return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+    def __init__(
+        self,
+        optimizer: torch.optim.Optimizer,
+        num_warmup_steps: int,
+        plateau_factor: float = 0.5,
+        plateau_patience: int = 5,
+        min_lr: float = 1e-6,
+    ):
+        self.optimizer = optimizer
+        self.num_warmup_steps = num_warmup_steps
+        self.base_lrs = [group['lr'] for group in optimizer.param_groups]
+        self.current_step = 0
+        self.warmup_finished = False
+
+        # ReduceLROnPlateau for post-warmup phase
+        self.plateau_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode='min',
+            factor=plateau_factor,
+            patience=plateau_patience,
+            min_lr=min_lr,
+        )
+
+    def step_batch(self):
+        """Call once per training batch. Only active during warmup phase.
+
+        During warmup: linearly scales LR from 0 → base_lr.
+        After warmup: no-op (LR managed by step_epoch).
+        """
+        if self.warmup_finished:
+            self.current_step += 1
+            return
+
+        self.current_step += 1
+
+        if self.current_step >= self.num_warmup_steps:
+            # Warmup just finished — restore base LR
+            for param_group, base_lr in zip(
+                self.optimizer.param_groups, self.base_lrs
+            ):
+                param_group['lr'] = base_lr
+            self.warmup_finished = True
+        else:
+            # Linear warmup: lr = base_lr × (step / num_warmup_steps)
+            warmup_fraction = self.current_step / self.num_warmup_steps
+            for param_group, base_lr in zip(
+                self.optimizer.param_groups, self.base_lrs
+            ):
+                param_group['lr'] = base_lr * warmup_fraction
+
+    def step_epoch(self, val_loss: float):
+        """Call once per epoch after validation. Active only after warmup.
+
+        Feeds val_loss to ReduceLROnPlateau which decides whether to
+        reduce LR based on plateau detection.
+        """
+        if self.warmup_finished:
+            self.plateau_scheduler.step(val_loss)
+
+    def get_last_lr(self) -> list[float]:
+        """Return current LR for each param group (for logging)."""
+        return [group['lr'] for group in self.optimizer.param_groups]
+
+    def state_dict(self) -> dict:
+        """Serialize scheduler state for checkpointing."""
+        return {
+            'current_step': self.current_step,
+            'warmup_finished': self.warmup_finished,
+            'base_lrs': self.base_lrs,
+            'num_warmup_steps': self.num_warmup_steps,
+            'plateau_scheduler_state': self.plateau_scheduler.state_dict(),
+        }
+
+    def load_state_dict(self, state: dict):
+        """Restore scheduler state from checkpoint."""
+        self.current_step = state['current_step']
+        self.warmup_finished = state['warmup_finished']
+        self.base_lrs = state['base_lrs']
+        self.num_warmup_steps = state['num_warmup_steps']
+        self.plateau_scheduler.load_state_dict(
+            state['plateau_scheduler_state']
+        )
 
 
 def train_one_epoch(
     model: torch.nn.Module,
     train_loader: DataLoader,
     optimizer: torch.optim.Optimizer,
-    scheduler: torch.optim.lr_scheduler.LambdaLR,
+    scheduler: WarmupThenPlateauScheduler,
     grad_scaler: torch.amp.GradScaler | None,
     device: torch.device,
     data_config,
@@ -267,7 +343,7 @@ def train_one_epoch(
         model: MaskedTrackPretrainer.
         train_loader: DataLoader yielding (X, y, Z) tuples.
         optimizer: AdamW optimizer.
-        scheduler: Learning rate scheduler.
+        scheduler: WarmupThenPlateauScheduler (step_batch called per step).
         grad_scaler: GradScaler for mixed precision, or None.
         device: Target device.
         data_config: Weaver DataConfig for input name ordering.
@@ -343,7 +419,7 @@ def train_one_epoch(
                 )
             optimizer.step()
 
-        scheduler.step()
+        scheduler.step_batch()
 
         batch_loss = loss.item()
         total_loss += batch_loss
@@ -489,7 +565,14 @@ def main():
     parser.add_argument('--lr', type=float, default=1e-3)
     parser.add_argument('--weight-decay', type=float, default=0.01)
     parser.add_argument('--warmup-fraction', type=float, default=0.05,
-                        help='Fraction of total steps for linear warmup')
+                        help='Fraction of total steps for linear warmup '
+                             '(capped at 2000 steps)')
+    parser.add_argument('--plateau-factor', type=float, default=0.5,
+                        help='LR reduction factor when val loss plateaus '
+                             '(new_lr = old_lr × factor)')
+    parser.add_argument('--plateau-patience', type=int, default=5,
+                        help='Number of epochs with no val loss improvement '
+                             'before reducing LR')
     parser.add_argument('--grad-clip', type=float, default=1.0,
                         help='Max gradient norm for clipping (0 to disable)')
     parser.add_argument('--train-fraction', type=float, default=0.8,
@@ -508,6 +591,9 @@ def main():
                              'defaults to 100 (likely wrong — set explicitly).')
     parser.add_argument('--mask-ratio', type=float, default=None,
                         help='Fraction of tracks to mask (overrides network config default)')
+    parser.add_argument('--num-enrichment-layers', type=int, default=None,
+                        help='Number of enrichment (MultiScaleEdgeConv) layers '
+                             '(overrides network config default)')
     parser.add_argument('--save-every', type=int, default=10,
                         help='Save checkpoint every N epochs')
     parser.add_argument('--resume', type=str, default=None,
@@ -616,6 +702,8 @@ def main():
     model_kwargs = {}
     if args.mask_ratio is not None:
         model_kwargs['mask_ratio'] = args.mask_ratio
+    if args.num_enrichment_layers is not None:
+        model_kwargs['num_enrichment_layers'] = args.num_enrichment_layers
     model, model_info = network_module.get_model(data_config, **model_kwargs)
     model = model.to(device)
 
@@ -658,12 +746,17 @@ def main():
     max_warmup_steps = 2000
     warmup_steps = min(int(args.warmup_fraction * total_steps), max_warmup_steps)
     logger.info(
-        f'LR schedule: {warmup_steps} warmup steps, '
-        f'{total_steps} total steps'
+        f'LR schedule: {warmup_steps} warmup steps, then '
+        f'ReduceLROnPlateau (factor={args.plateau_factor}, '
+        f'patience={args.plateau_patience})'
     )
 
-    scheduler = build_cosine_schedule_with_warmup(
-        optimizer, warmup_steps, total_steps
+    scheduler = WarmupThenPlateauScheduler(
+        optimizer,
+        num_warmup_steps=warmup_steps,
+        plateau_factor=args.plateau_factor,
+        plateau_patience=args.plateau_patience,
+        min_lr=1e-6,
     )
 
     # ---- Mixed precision ----
@@ -715,7 +808,15 @@ def main():
         )
         logger.info(f'Epoch {epoch} val loss: {val_loss:.5f}')
 
+        # Step the plateau scheduler with val loss (no-op during warmup)
+        previous_lr = scheduler.get_last_lr()[0]
+        scheduler.step_epoch(val_loss)
         current_lr = scheduler.get_last_lr()[0]
+        if current_lr < previous_lr:
+            logger.info(
+                f'ReduceLROnPlateau triggered: LR {previous_lr:.2e} → '
+                f'{current_lr:.2e}'
+            )
 
         # TensorBoard: per-epoch logging
         tensorboard_writer.add_scalar('Loss/train_epoch', train_loss, epoch)

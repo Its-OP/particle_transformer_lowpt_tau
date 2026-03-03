@@ -12,6 +12,14 @@ def get_model(data_config, **kwargs):
 
     input_dim = len(data_config.input_dicts['pf_features'])
 
+    # Number of enrichment layers is configurable via --num-enrichment-layers.
+    # Default: 5 layers (deeper than ParticleNeXt's 3 to compensate for
+    # ~10× more particles: ~1130 vs ~30-150).
+    num_enrichment_layers = kwargs.pop('num_enrichment_layers', 5)
+
+    # Each layer: (k, out_dim, reduction_dilation, message_dim)
+    single_layer_params = (32, 256, [(8, 1), (4, 1), (2, 1), (1, 1)], 64)
+
     cfg = dict(
         backbone_kwargs=dict(
             input_dim=input_dim,
@@ -21,16 +29,8 @@ def get_model(data_config, **kwargs):
                 num_neighbors=32,
                 edge_aggregation='attn8',
                 layer_params=[
-                    # (k, out_dim, reduction_dilation, message_dim)
-                    # 5× MultiScaleEdgeConv layers — deeper than ParticleNeXt's 3
-                    # to compensate for ~10× more particles (~1130 vs ~30-150).
-                    # 5-hop receptive field covers more of the particle cloud
-                    # before compaction discards spatial resolution.
-                    (32, 256, [(8, 1), (4, 1), (2, 1), (1, 1)], 64),
-                    (32, 256, [(8, 1), (4, 1), (2, 1), (1, 1)], 64),
-                    (32, 256, [(8, 1), (4, 1), (2, 1), (1, 1)], 64),
-                    (32, 256, [(8, 1), (4, 1), (2, 1), (1, 1)], 64),
-                    (32, 256, [(8, 1), (4, 1), (2, 1), (1, 1)], 64),
+                    single_layer_params
+                    for _ in range(num_enrichment_layers)
                 ],
             ),
             compaction_kwargs=dict(

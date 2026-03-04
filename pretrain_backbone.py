@@ -594,6 +594,12 @@ def main():
     parser.add_argument('--num-enrichment-layers', type=int, default=None,
                         help='Number of enrichment (MultiScaleEdgeConv) layers '
                              '(overrides network config default)')
+    parser.add_argument('--train-matcher', type=str, default=None,
+                        choices=['hungarian', 'sinkhorn'],
+                        help='Matching algorithm for training assignment. '
+                             'hungarian=exact optimal (CPU), '
+                             'sinkhorn=approximate non-bijective (GPU). '
+                             'Validation always uses exact Hungarian.')
     parser.add_argument('--save-every', type=int, default=10,
                         help='Save checkpoint every N epochs')
     parser.add_argument('--resume', type=str, default=None,
@@ -704,6 +710,8 @@ def main():
         model_kwargs['mask_ratio'] = args.mask_ratio
     if args.num_enrichment_layers is not None:
         model_kwargs['num_enrichment_layers'] = args.num_enrichment_layers
+    if args.train_matcher is not None:
+        model_kwargs['train_matcher'] = args.train_matcher
     model, model_info = network_module.get_model(data_config, **model_kwargs)
     model = model.to(device)
 

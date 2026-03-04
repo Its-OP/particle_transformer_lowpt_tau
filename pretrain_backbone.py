@@ -773,6 +773,7 @@ def main():
     # ---- Resume from checkpoint ----
     start_epoch = 1
     best_val_loss = float('inf')
+    best_val_epoch = 0
     global_batch_count = 0
     loss_history = {'train': [], 'val': [], 'lr': []}
 
@@ -786,11 +787,12 @@ def main():
         scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
         start_epoch = checkpoint['epoch'] + 1
         best_val_loss = checkpoint.get('best_val_loss', float('inf'))
+        best_val_epoch = checkpoint.get('best_val_epoch', 0)
         global_batch_count = checkpoint.get('global_batch_count', 0)
         loss_history = checkpoint.get('loss_history', loss_history)
         logger.info(
             f'Resumed at epoch {start_epoch}, '
-            f'best_val_loss={best_val_loss:.5f}'
+            f'best_val_loss={best_val_loss:.5f} (epoch {best_val_epoch})'
         )
 
     # ---- Training loop ----
@@ -814,7 +816,23 @@ def main():
             model, val_loader, device, data_config,
             mask_input_index=mask_input_index, max_steps=val_steps,
         )
-        logger.info(f'Epoch {epoch} val loss: {val_loss:.5f}')
+        # Check if this is the best val loss so far
+        is_best = val_loss < best_val_loss
+        if is_best:
+            best_val_loss = val_loss
+            best_val_epoch = epoch
+
+        # Log val loss with patience counter (epochs since best),
+        # but only show patience when this is NOT the best epoch
+        if is_best:
+            logger.info(f'Epoch {epoch} val loss: {val_loss:.5f} ★ new best')
+        else:
+            epochs_since_best = epoch - best_val_epoch
+            logger.info(
+                f'Epoch {epoch} val loss: {val_loss:.5f} '
+                f'(patience: {epochs_since_best}/{args.plateau_patience}, '
+                f'best: {best_val_loss:.5f})'
+            )
 
         # Step the plateau scheduler with val loss (no-op during warmup)
         previous_lr = scheduler.get_last_lr()[0]
@@ -837,11 +855,6 @@ def main():
         loss_history['lr'].append(current_lr)
         save_loss_history(loss_history, experiment_dir)
 
-        # Save checkpoint
-        is_best = val_loss < best_val_loss
-        if is_best:
-            best_val_loss = val_loss
-
         if epoch % args.save_every == 0 or is_best or epoch == args.epochs:
             checkpoint = {
                 'epoch': epoch,
@@ -851,6 +864,7 @@ def main():
                 'train_loss': train_loss,
                 'val_loss': val_loss,
                 'best_val_loss': best_val_loss,
+                'best_val_epoch': best_val_epoch,
                 'global_batch_count': global_batch_count,
                 'loss_history': loss_history,
                 'args': vars(args),

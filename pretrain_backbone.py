@@ -41,6 +41,7 @@ import argparse
 import importlib.util
 import json
 import logging
+import math
 import os
 import sys
 import time
@@ -322,11 +323,119 @@ class WarmupThenPlateauScheduler:
         )
 
 
+class WarmupThenCosineScheduler:
+    """Two-phase LR scheduler: linear warmup → cosine annealing.
+
+    Phase 1 (warmup): LR scales linearly from 0 to base_lr over
+        num_warmup_steps. Called per training step via step_batch().
+
+    Phase 2 (cosine): LR decays following a cosine curve from base_lr
+        to min_lr over the remaining epochs. Called per epoch via
+        step_epoch(val_loss).
+
+    Cosine annealing provides a smooth, monotonic LR decay that avoids
+    the abrupt drops of step/plateau schedulers. The schedule is fully
+    deterministic — no dependence on val_loss trajectory.
+
+    LR formula (post-warmup):
+        lr(t) = min_lr + 0.5 * (base_lr - min_lr) * (1 + cos(π * t / T_max))
+    where t = epoch index within the cosine phase, T_max = total cosine epochs.
+
+    Args:
+        optimizer: Optimizer whose LR will be controlled.
+        num_warmup_steps: Number of linear warmup steps.
+        num_post_warmup_epochs: Number of epochs for the cosine decay phase.
+        min_lr: Lower bound on the learning rate (default 1e-6).
+    """
+
+    def __init__(
+        self,
+        optimizer: torch.optim.Optimizer,
+        num_warmup_steps: int,
+        num_post_warmup_epochs: int,
+        min_lr: float = 1e-6,
+    ):
+        self.optimizer = optimizer
+        self.num_warmup_steps = num_warmup_steps
+        self.base_lrs = [group['lr'] for group in optimizer.param_groups]
+        self.current_step = 0
+        self.warmup_finished = False
+
+        # CosineAnnealingLR for post-warmup phase.
+        # T_max = number of epoch-level steps over which cosine decays to eta_min.
+        self.cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=max(1, num_post_warmup_epochs),
+            eta_min=min_lr,
+        )
+
+    def step_batch(self):
+        """Call once per training batch. Only active during warmup phase.
+
+        During warmup: linearly scales LR from 0 → base_lr.
+        After warmup: no-op (LR managed by step_epoch).
+        """
+        if self.warmup_finished:
+            self.current_step += 1
+            return
+
+        self.current_step += 1
+
+        if self.current_step >= self.num_warmup_steps:
+            # Warmup just finished — restore base LR
+            for param_group, base_lr in zip(
+                self.optimizer.param_groups, self.base_lrs
+            ):
+                param_group['lr'] = base_lr
+            self.warmup_finished = True
+        else:
+            # Linear warmup: lr = base_lr × (step / num_warmup_steps)
+            warmup_fraction = self.current_step / self.num_warmup_steps
+            for param_group, base_lr in zip(
+                self.optimizer.param_groups, self.base_lrs
+            ):
+                param_group['lr'] = base_lr * warmup_fraction
+
+    def step_epoch(self, val_loss: float):
+        """Call once per epoch after validation. Active only after warmup.
+
+        Steps the cosine scheduler unconditionally (val_loss is accepted
+        for interface compatibility with WarmupThenPlateauScheduler but
+        is not used).
+        """
+        if self.warmup_finished:
+            self.cosine_scheduler.step()
+
+    def get_last_lr(self) -> list[float]:
+        """Return current LR for each param group (for logging)."""
+        return [group['lr'] for group in self.optimizer.param_groups]
+
+    def state_dict(self) -> dict:
+        """Serialize scheduler state for checkpointing."""
+        return {
+            'current_step': self.current_step,
+            'warmup_finished': self.warmup_finished,
+            'base_lrs': self.base_lrs,
+            'num_warmup_steps': self.num_warmup_steps,
+            'cosine_scheduler_state': self.cosine_scheduler.state_dict(),
+        }
+
+    def load_state_dict(self, state: dict):
+        """Restore scheduler state from checkpoint."""
+        self.current_step = state['current_step']
+        self.warmup_finished = state['warmup_finished']
+        self.base_lrs = state['base_lrs']
+        self.num_warmup_steps = state['num_warmup_steps']
+        self.cosine_scheduler.load_state_dict(
+            state['cosine_scheduler_state']
+        )
+
+
 def train_one_epoch(
     model: torch.nn.Module,
     train_loader: DataLoader,
     optimizer: torch.optim.Optimizer,
-    scheduler: WarmupThenPlateauScheduler,
+    scheduler: WarmupThenPlateauScheduler | WarmupThenCosineScheduler,
     grad_scaler: torch.amp.GradScaler | None,
     device: torch.device,
     data_config,
@@ -564,15 +673,22 @@ def main():
     parser.add_argument('--batch-size', type=int, default=32)
     parser.add_argument('--lr', type=float, default=1e-3)
     parser.add_argument('--weight-decay', type=float, default=0.01)
+    parser.add_argument('--scheduler', type=str, default='plateau',
+                        choices=['plateau', 'cosine'],
+                        help='LR scheduler after warmup: '
+                             'plateau=ReduceLROnPlateau (adaptive), '
+                             'cosine=CosineAnnealingLR (deterministic)')
     parser.add_argument('--warmup-fraction', type=float, default=0.05,
                         help='Fraction of total steps for linear warmup '
                              '(capped at 2000 steps)')
     parser.add_argument('--plateau-factor', type=float, default=0.5,
                         help='LR reduction factor when val loss plateaus '
-                             '(new_lr = old_lr × factor)')
+                             '(new_lr = old_lr × factor). Only used with '
+                             '--scheduler plateau')
     parser.add_argument('--plateau-patience', type=int, default=5,
                         help='Number of epochs with no val loss improvement '
-                             'before reducing LR')
+                             'before reducing LR. Only used with '
+                             '--scheduler plateau')
     parser.add_argument('--grad-clip', type=float, default=1.0,
                         help='Max gradient norm for clipping (0 to disable)')
     parser.add_argument('--train-fraction', type=float, default=0.8,
@@ -753,19 +869,35 @@ def main():
     total_steps = args.epochs * steps_per_epoch
     max_warmup_steps = 2000
     warmup_steps = min(int(args.warmup_fraction * total_steps), max_warmup_steps)
-    logger.info(
-        f'LR schedule: {warmup_steps} warmup steps, then '
-        f'ReduceLROnPlateau (factor={args.plateau_factor}, '
-        f'patience={args.plateau_patience})'
-    )
 
-    scheduler = WarmupThenPlateauScheduler(
-        optimizer,
-        num_warmup_steps=warmup_steps,
-        plateau_factor=args.plateau_factor,
-        plateau_patience=args.plateau_patience,
-        min_lr=1e-6,
-    )
+    if args.scheduler == 'cosine':
+        # Number of full epochs consumed by warmup (rounded up), so the
+        # cosine curve spans exactly the remaining post-warmup epochs.
+        warmup_epochs = math.ceil(warmup_steps / steps_per_epoch)
+        num_post_warmup_epochs = max(1, args.epochs - warmup_epochs)
+        logger.info(
+            f'LR schedule: {warmup_steps} warmup steps (~{warmup_epochs} epochs), then '
+            f'CosineAnnealingLR over {num_post_warmup_epochs} epochs'
+        )
+        scheduler = WarmupThenCosineScheduler(
+            optimizer,
+            num_warmup_steps=warmup_steps,
+            num_post_warmup_epochs=num_post_warmup_epochs,
+            min_lr=1e-6,
+        )
+    else:
+        logger.info(
+            f'LR schedule: {warmup_steps} warmup steps, then '
+            f'ReduceLROnPlateau (factor={args.plateau_factor}, '
+            f'patience={args.plateau_patience})'
+        )
+        scheduler = WarmupThenPlateauScheduler(
+            optimizer,
+            num_warmup_steps=warmup_steps,
+            plateau_factor=args.plateau_factor,
+            plateau_patience=args.plateau_patience,
+            min_lr=1e-6,
+        )
 
     # ---- Mixed precision ----
     grad_scaler = torch.amp.GradScaler('cuda') if args.amp else None
@@ -822,23 +954,31 @@ def main():
             best_val_loss = val_loss
             best_val_epoch = epoch
 
-        # Log val loss with patience counter (epochs since best),
-        # but only show patience when this is NOT the best epoch
+        # Log val loss with patience counter (epochs since best).
+        # Patience is only meaningful for plateau scheduler; cosine decays
+        # unconditionally regardless of val loss trajectory.
         if is_best:
             logger.info(f'Epoch {epoch} val loss: {val_loss:.5f} ★ new best')
         else:
             epochs_since_best = epoch - best_val_epoch
-            logger.info(
-                f'Epoch {epoch} val loss: {val_loss:.5f} '
-                f'(patience: {epochs_since_best}/{args.plateau_patience}, '
-                f'best: {best_val_loss:.5f})'
-            )
+            if args.scheduler == 'plateau':
+                logger.info(
+                    f'Epoch {epoch} val loss: {val_loss:.5f} '
+                    f'(patience: {epochs_since_best}/{args.plateau_patience}, '
+                    f'best: {best_val_loss:.5f})'
+                )
+            else:
+                logger.info(
+                    f'Epoch {epoch} val loss: {val_loss:.5f} '
+                    f'(best: {best_val_loss:.5f})'
+                )
 
-        # Step the plateau scheduler with val loss (no-op during warmup)
+        # Step the scheduler with val loss (no-op during warmup).
+        # Plateau uses val_loss for plateau detection; cosine ignores it.
         previous_lr = scheduler.get_last_lr()[0]
         scheduler.step_epoch(val_loss)
         current_lr = scheduler.get_last_lr()[0]
-        if current_lr < previous_lr:
+        if current_lr < previous_lr and args.scheduler == 'plateau':
             logger.info(
                 f'ReduceLROnPlateau triggered: LR {previous_lr:.2e} → '
                 f'{current_lr:.2e}'

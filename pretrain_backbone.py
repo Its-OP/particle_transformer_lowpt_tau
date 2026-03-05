@@ -710,6 +710,10 @@ def main():
     parser.add_argument('--num-enrichment-layers', type=int, default=None,
                         help='Number of enrichment (MultiScaleEdgeConv) layers '
                              '(overrides network config default)')
+    parser.add_argument('--num-decoder-layers', type=int, default=None,
+                        help='Number of DETR-style decoder layers '
+                             '(self-attn + cross-attn + FFN per layer). '
+                             'Default: 1')
     parser.add_argument('--train-matcher', type=str, default=None,
                         choices=['hungarian', 'sinkhorn'],
                         help='Matching algorithm for training assignment. '
@@ -826,6 +830,8 @@ def main():
         model_kwargs['mask_ratio'] = args.mask_ratio
     if args.num_enrichment_layers is not None:
         model_kwargs['num_enrichment_layers'] = args.num_enrichment_layers
+    if args.num_decoder_layers is not None:
+        model_kwargs['num_decoder_layers'] = args.num_decoder_layers
     if args.train_matcher is not None:
         model_kwargs['train_matcher'] = args.train_matcher
     model, model_info = network_module.get_model(data_config, **model_kwargs)

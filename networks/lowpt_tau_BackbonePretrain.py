@@ -17,6 +17,11 @@ def get_model(data_config, **kwargs):
     # ~10× more particles: ~1130 vs ~30-150).
     num_enrichment_layers = kwargs.pop('num_enrichment_layers', 5)
 
+    # Number of DETR-style decoder layers (self-attn → cross-attn → FFN).
+    # Default: 1 layer. More layers give queries more capacity to coordinate
+    # and refine predictions.
+    num_decoder_layers = kwargs.pop('num_decoder_layers', 1)
+
     # Each layer: (k, out_dim, reduction_dilation, message_dim)
     single_layer_params = (32, 256, [(8, 1), (4, 1), (2, 1), (1, 1)], 64)
 
@@ -42,6 +47,7 @@ def get_model(data_config, **kwargs):
         decoder_kwargs=dict(
             decoder_dim=128,
             num_heads=4,
+            num_decoder_layers=num_decoder_layers,
             num_output_features=input_dim,
             max_masked_tracks=1600,
             dropout=0.0,

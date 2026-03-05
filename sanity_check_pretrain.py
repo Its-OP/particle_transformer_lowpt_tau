@@ -1012,6 +1012,8 @@ def main():
         model_kwargs['num_enrichment_layers'] = checkpoint_args['num_enrichment_layers']
     if 'train_matcher' in checkpoint_args:
         model_kwargs['train_matcher'] = checkpoint_args['train_matcher']
+    if 'num_decoder_layers' in checkpoint_args:
+        model_kwargs['num_decoder_layers'] = checkpoint_args['num_decoder_layers']
 
     network_module = load_network_module(args.network)
     model, _ = network_module.get_model(data_config, **model_kwargs)

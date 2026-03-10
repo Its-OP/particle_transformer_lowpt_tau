@@ -689,6 +689,9 @@ def main():
                         help='Number of epochs with no val loss improvement '
                              'before reducing LR. Only used with '
                              '--scheduler plateau')
+    parser.add_argument('--min-lr', type=float, default=1e-6,
+                        help='Lower bound on the learning rate for both '
+                             'plateau and cosine schedulers')
     parser.add_argument('--grad-clip', type=float, default=1.0,
                         help='Max gradient norm for clipping (0 to disable)')
     parser.add_argument('--train-fraction', type=float, default=0.8,
@@ -889,7 +892,7 @@ def main():
             optimizer,
             num_warmup_steps=warmup_steps,
             num_post_warmup_epochs=num_post_warmup_epochs,
-            min_lr=1e-6,
+            min_lr=args.min_lr,
         )
     else:
         logger.info(
@@ -902,7 +905,7 @@ def main():
             num_warmup_steps=warmup_steps,
             plateau_factor=args.plateau_factor,
             plateau_patience=args.plateau_patience,
-            min_lr=1e-6,
+            min_lr=args.min_lr,
         )
 
     # ---- Mixed precision ----

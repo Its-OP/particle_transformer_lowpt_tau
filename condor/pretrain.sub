@@ -1,0 +1,29 @@
+executable = /eos/user/o/oprostak/src/part/condor/run_pretrain.sh
+
+training_args = --model-name BackbonePretrain --epochs 500 --batch-size 128 --lr 1e-3 --min-lr 1e-7 --mask-ratio 0.5 --plateau-factor 0.5 --plateau-patience 3 --num-enrichment-layers 5 --num-decoder-layers 1 --steps-per-epoch 500
+arguments = $(training_args)
+
+environment = "CONDOR_CLUSTER_ID=$(ClusterId) CONDOR_PROC_ID=$(ProcId)"
+
+output = /eos/user/o/oprostak/src/part/condor/logs/pretrain_$(ClusterId).$(ProcId).out
+error  = /eos/user/o/oprostak/src/part/condor/logs/pretrain_$(ClusterId).$(ProcId).err
+log    = /eos/user/o/oprostak/src/part/condor/logs/pretrain_$(ClusterId).log
+
+
+# ---- Resource requests ----
+# GPU: one H100 80 GB (batch_size=128 uses ~77 GB).
+# Reduce batch_size for smaller GPUs (batch_size=48 → ~29 GB).
+request_GPUs   = 1
+request_CPUs   = 4
+request_memory = 64 GB
+request_disk   = 50 GB
+
+requirements = (regexp("H100", GPUs_DeviceName))
+
++JobFlavour = "espresso"
+
+should_transfer_files = NO
+
+notification = Error
+
+queue

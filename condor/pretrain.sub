@@ -18,7 +18,7 @@ request_CPUs   = 4
 request_memory = 64 GB
 request_disk   = 50 GB
 
-requirements = (GPUMemoryMB >= 48000)
+requirements = (GPUs_GlobalMemoryMb >= 48000)
 
 +JobFlavour = "espresso"
 

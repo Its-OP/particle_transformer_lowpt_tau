@@ -1,6 +1,6 @@
 executable = /eos/user/o/oprostak/src/part/condor/run_pretrain.sh
 
-training_args = --model-name BackbonePretrain --epochs 500 --batch-size 128 --lr 1e-3 --min-lr 1e-7 --mask-ratio 0.5 --plateau-factor 0.5 --plateau-patience 3 --num-enrichment-layers 5 --num-decoder-layers 1 --steps-per-epoch 500
+training_args = --model-name BackbonePretrain --epochs 2 --batch-size 128 --lr 1e-3 --min-lr 1e-7 --mask-ratio 0.5 --plateau-factor 0.5 --plateau-patience 3 --num-enrichment-layers 3 --num-decoder-layers 1 --steps-per-epoch 10
 arguments = $(training_args)
 
 environment = "CONDOR_CLUSTER_ID=$(ClusterId) CONDOR_PROC_ID=$(ProcId)"

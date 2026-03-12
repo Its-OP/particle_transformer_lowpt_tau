@@ -228,10 +228,13 @@ log "Created EOS placeholder: ${PLACEHOLDER_DIR}"
 
 
 # ---- Activate conda environment ----
-log "Activating conda environment '${CONDA_ENV_NAME}'..."
+# Activate by full path (more reliable on batch nodes where the env may
+# not be registered in conda's envs_dirs).
+CONDA_ENV_PATH="${CONDA_DIR}/envs/${CONDA_ENV_NAME}"
+log "Activating conda environment: ${CONDA_ENV_PATH}"
 # shellcheck source=/dev/null
 source "${CONDA_DIR}/etc/profile.d/conda.sh"
-conda activate "${CONDA_ENV_NAME}"
+conda activate "${CONDA_ENV_PATH}"
 
 log "Python:  $(which python)"
 log "PyTorch: $(python -c 'import torch; print(torch.__version__)')"

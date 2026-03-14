@@ -53,7 +53,16 @@ NUM_WORKERS=4
 NO_COMPILE=false
 
 # ---- Parse extra arguments ----
-EXTRA_ARGS="$*"
+# Check if --no-compile was passed via CLI and update the variable
+# so the summary display is accurate.
+EXTRA_ARGS=""
+for arg in "$@"; do
+    if [ "$arg" = "--no-compile" ]; then
+        NO_COMPILE=true
+    else
+        EXTRA_ARGS="${EXTRA_ARGS:+${EXTRA_ARGS} }${arg}"
+    fi
+done
 
 # ---- Resolve conda ----
 if command -v conda &>/dev/null; then

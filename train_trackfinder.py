@@ -688,7 +688,7 @@ def main():
             'Compiling model with torch.compile '
             '(mode="default", dynamic=True)...',
         )
-        model = torch.compile(model, mode='default', dynamic=True)
+        model = torch.compile(model, mode='max-autotune', dynamic=True)
         logger.info('Model compiled.')
     else:
         logger.info('torch.compile disabled.')
@@ -953,7 +953,7 @@ def main():
         # Recompile if using torch.compile
         if use_compile:
             model = torch.compile(
-                original_model, mode='default', dynamic=True,
+                original_model, mode='max-autotune', dynamic=True,
             )
 
         finetune_start = args.epochs + 1

@@ -49,6 +49,7 @@ DEVICE="cuda:0"
 # Track finding sees the same labels every epoch (no random masking),
 # so 1× per epoch is standard. floor(200000 / 64) = 3125.
 STEPS_PER_EPOCH=500
+NUM_WORKERS=4
 
 # ---- Parse extra arguments ----
 EXTRA_ARGS="$*"
@@ -83,6 +84,7 @@ TRAIN_CMD="${CONDA_INIT} && cd ${SCRIPT_DIR} && python train_trackfinder.py \
     --lr ${LEARNING_RATE} \
     --scheduler ${SCHEDULER} \
     --device ${DEVICE} \
+    --num-workers ${NUM_WORKERS} \
     --amp"
 
 # Add pretrained backbone if specified

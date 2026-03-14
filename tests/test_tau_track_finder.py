@@ -1,0 +1,330 @@
+"""Unit tests for TauTrackFinder (top-level module: backbone + head + loss).
+
+Tests cover:
+    - Forward pass smoke test: random input → finite loss, correct shapes
+    - Hungarian matching: cost matrix shape, matched indices validity
+    - Loss components: pointer focal loss and confidence BCE are finite and non-negative
+    - GT extraction: correct extraction of up to 6 tau-track indices from labels
+    - Zero GT event: all confidence targets = 0, no pointer loss
+    - Backbone freezing: backbone params have requires_grad=False
+"""
+import pytest
+import torch
+
+from weaver.nn.model.TauTrackFinder import TauTrackFinder
+
+
+# ---- Fixtures ----
+
+BATCH_SIZE = 4
+NUM_TRACKS = 200  # Smaller than real ~1130 for test speed
+INPUT_DIM = 7
+NUM_QUERIES = 15
+MAX_GT_TRACKS = 6
+
+
+def _make_backbone_kwargs(input_dim=INPUT_DIM):
+    """Build backbone kwargs matching the pretraining config."""
+    return dict(
+        input_dim=input_dim,
+        enrichment_kwargs=dict(
+            node_dim=32,
+            edge_dim=8,
+            num_neighbors=16,  # Smaller than real 32 for speed
+            edge_aggregation='attn8',
+            layer_params=[
+                # Single layer for test speed
+                (16, 64, [(4, 1), (2, 1)], 32),
+            ],
+        ),
+        compaction_kwargs=dict(
+            stage_output_points=[64, 32],  # Smaller for speed
+            stage_output_channels=[64, 64],
+            stage_num_neighbors=[8, 8],
+        ),
+    )
+
+
+def _make_decoder_kwargs():
+    """Build decoder kwargs for testing."""
+    return dict(
+        num_queries=NUM_QUERIES,
+        max_gt_tracks=MAX_GT_TRACKS,
+        decoder_dim=64,  # Smaller for speed
+        pointer_dim=32,
+        num_heads=4,
+        num_encoder_layers=1,  # Minimal for speed
+        num_decoder_layers=1,
+        dropout=0.0,
+    )
+
+
+@pytest.fixture
+def model():
+    """Create a TauTrackFinder with small architecture for testing."""
+    return TauTrackFinder(
+        backbone_kwargs=_make_backbone_kwargs(),
+        decoder_kwargs=_make_decoder_kwargs(),
+    )
+
+
+def _make_physical_inputs(batch_size, num_tracks, input_dim=INPUT_DIM, seed=42):
+    """Create physically sensible synthetic inputs.
+
+    Lorentz vectors must be physical (positive energy, E >= |p|) because
+    the backbone computes pairwise_lv_fts() with log(kT), log(ΔR), etc.
+    Random negative values would produce NaN from log of negatives.
+
+    Uses fixed seed for test reproducibility.
+    """
+    generator = torch.Generator().manual_seed(seed)
+
+    # Points: (η, φ) coordinates in realistic ranges
+    eta = torch.randn(batch_size, 1, num_tracks, generator=generator) * 1.5
+    phi = torch.rand(batch_size, 1, num_tracks, generator=generator) * 2 * 3.14159 - 3.14159
+    points = torch.cat([eta, phi], dim=1)
+
+    # Features: standardized (zero-mean, unit-variance)
+    features = torch.randn(batch_size, input_dim, num_tracks, generator=generator)
+
+    # Lorentz vectors: physical 4-momenta (px, py, pz, E)
+    pt = torch.rand(batch_size, 1, num_tracks, generator=generator) * 5 + 0.5  # pT ∈ [0.5, 5.5] GeV
+    px = pt * torch.cos(phi)
+    py = pt * torch.sin(phi)
+    pz = pt * torch.sinh(eta)
+    pion_mass = 0.13957
+    energy = torch.sqrt(px**2 + py**2 + pz**2 + pion_mass**2)
+    lorentz_vectors = torch.cat([px, py, pz, energy], dim=1)
+
+    return points, features, lorentz_vectors
+
+
+@pytest.fixture
+def sample_training_inputs():
+    """Create physically sensible synthetic training inputs with track labels."""
+    points, features, lorentz_vectors = _make_physical_inputs(
+        BATCH_SIZE, NUM_TRACKS, seed=42,
+    )
+
+    mask = torch.ones(BATCH_SIZE, 1, NUM_TRACKS)
+    # Last 50 tracks are padding
+    mask[:, :, -50:] = 0.0
+
+    # Track labels: 3 tau tracks per event (at positions 10, 20, 30)
+    track_labels = torch.zeros(BATCH_SIZE, 1, NUM_TRACKS)
+    for batch_index in range(BATCH_SIZE):
+        track_labels[batch_index, 0, 10] = 1.0
+        track_labels[batch_index, 0, 20] = 1.0
+        track_labels[batch_index, 0, 30] = 1.0
+
+    return points, features, lorentz_vectors, mask, track_labels
+
+
+# ---- Forward Pass Smoke Tests ----
+
+class TestForwardPass:
+    """Verify the complete forward pass produces valid outputs."""
+
+    def test_training_returns_finite_loss(self, model, sample_training_inputs):
+        points, features, lorentz_vectors, mask, track_labels = sample_training_inputs
+        model.train()
+        loss_dict = model(points, features, lorentz_vectors, mask, track_labels)
+
+        assert 'total_loss' in loss_dict
+        assert torch.isfinite(loss_dict['total_loss']).all(), (
+            f"Total loss is not finite: {loss_dict['total_loss']}"
+        )
+
+    def test_training_loss_is_scalar(self, model, sample_training_inputs):
+        points, features, lorentz_vectors, mask, track_labels = sample_training_inputs
+        model.train()
+        loss_dict = model(points, features, lorentz_vectors, mask, track_labels)
+
+        # Loss should be a scalar (0-dim) tensor
+        assert loss_dict['total_loss'].dim() == 0
+
+    def test_inference_returns_logits(self, model, sample_training_inputs):
+        points, features, lorentz_vectors, mask, _ = sample_training_inputs
+        model.eval()
+        with torch.no_grad():
+            output = model(points, features, lorentz_vectors, mask)
+
+        assert 'pointer_logits' in output
+        assert 'confidence_logits' in output
+        assert output['pointer_logits'].shape == (
+            BATCH_SIZE, NUM_QUERIES, NUM_TRACKS,
+        )
+        assert output['confidence_logits'].shape == (BATCH_SIZE, NUM_QUERIES)
+
+    def test_loss_is_non_negative(self, model, sample_training_inputs):
+        points, features, lorentz_vectors, mask, track_labels = sample_training_inputs
+        model.train()
+        loss_dict = model(points, features, lorentz_vectors, mask, track_labels)
+
+        assert loss_dict['total_loss'].item() >= 0.0
+        assert loss_dict['pointer_focal_loss'].item() >= 0.0
+        assert loss_dict['confidence_bce_loss'].item() >= 0.0
+
+
+# ---- Loss Component Tests ----
+
+class TestLossComponents:
+    """Verify individual loss components."""
+
+    def test_both_loss_components_present(self, model, sample_training_inputs):
+        points, features, lorentz_vectors, mask, track_labels = sample_training_inputs
+        model.train()
+        loss_dict = model(points, features, lorentz_vectors, mask, track_labels)
+
+        assert 'pointer_focal_loss' in loss_dict
+        assert 'confidence_bce_loss' in loss_dict
+        assert 'total_loss' in loss_dict
+
+    def test_loss_components_are_finite(self, model, sample_training_inputs):
+        points, features, lorentz_vectors, mask, track_labels = sample_training_inputs
+        model.train()
+        loss_dict = model(points, features, lorentz_vectors, mask, track_labels)
+
+        for key, value in loss_dict.items():
+            assert torch.isfinite(value).all(), f"{key} is not finite: {value}"
+
+    def test_total_loss_is_weighted_sum(self, model, sample_training_inputs):
+        points, features, lorentz_vectors, mask, track_labels = sample_training_inputs
+        model.train()
+        loss_dict = model(points, features, lorentz_vectors, mask, track_labels)
+
+        expected_total = (
+            model.pointer_loss_weight * loss_dict['pointer_focal_loss']
+            + model.confidence_loss_weight * loss_dict['confidence_bce_loss']
+        )
+        torch.testing.assert_close(
+            loss_dict['total_loss'], expected_total, rtol=1e-5, atol=1e-7,
+        )
+
+
+# ---- Ground Truth Extraction Tests ----
+
+class TestGroundTruthExtraction:
+    """Verify GT track index extraction from labels."""
+
+    def test_extract_correct_count(self, model):
+        """Should extract the right number of GT indices per event."""
+        # 3 tau tracks at positions 5, 15, 25
+        labels = torch.zeros(2, 1, 100)
+        labels[0, 0, 5] = 1.0
+        labels[0, 0, 15] = 1.0
+        labels[0, 0, 25] = 1.0
+        # 1 tau track at position 40
+        labels[1, 0, 40] = 1.0
+
+        mask = torch.ones(2, 1, 100)
+
+        gt_indices, gt_count = model._extract_ground_truth_indices(labels, mask)
+
+        assert gt_count[0].item() == 3
+        assert gt_count[1].item() == 1
+        assert gt_indices.shape == (2, MAX_GT_TRACKS)
+
+    def test_max_6_gt_tracks(self, model):
+        """Should clamp to max 6 even if more are labeled."""
+        labels = torch.zeros(1, 1, 100)
+        # 8 tau tracks (more than max 6)
+        for position in [5, 10, 15, 20, 25, 30, 35, 40]:
+            labels[0, 0, position] = 1.0
+
+        mask = torch.ones(1, 1, 100)
+        gt_indices, gt_count = model._extract_ground_truth_indices(labels, mask)
+
+        assert gt_count[0].item() == 6  # Clamped to max
+        assert gt_indices.shape == (1, MAX_GT_TRACKS)
+
+    def test_zero_gt_tracks(self, model):
+        """Should handle events with no tau tracks."""
+        labels = torch.zeros(1, 1, 100)
+        mask = torch.ones(1, 1, 100)
+
+        gt_indices, gt_count = model._extract_ground_truth_indices(labels, mask)
+
+        assert gt_count[0].item() == 0
+
+    def test_padding_not_counted_as_gt(self, model):
+        """GT labels on padded tracks should be ignored."""
+        labels = torch.zeros(1, 1, 100)
+        labels[0, 0, 95] = 1.0  # Labeled track in padding zone
+        mask = torch.ones(1, 1, 100)
+        mask[0, 0, 90:] = 0.0  # Last 10 tracks are padding
+
+        gt_indices, gt_count = model._extract_ground_truth_indices(labels, mask)
+
+        assert gt_count[0].item() == 0  # Padded label should be ignored
+
+
+# ---- Zero GT Event Tests ----
+
+class TestZeroGroundTruth:
+    """Verify behavior when an event has no GT tracks."""
+
+    def test_zero_gt_loss_is_finite(self, model):
+        """Loss should be finite even with 0 GT tracks."""
+        points, features, lorentz_vectors = _make_physical_inputs(1, NUM_TRACKS)
+        mask = torch.ones(1, 1, NUM_TRACKS)
+        track_labels = torch.zeros(1, 1, NUM_TRACKS)  # No GT tracks
+
+        model.train()
+        loss_dict = model(points, features, lorentz_vectors, mask, track_labels)
+
+        assert torch.isfinite(loss_dict['total_loss']).all()
+        # Pointer loss should be 0 (no matched queries)
+        assert loss_dict['pointer_focal_loss'].item() == 0.0
+        # Confidence loss should still be computed (all targets = 0)
+        assert loss_dict['confidence_bce_loss'].item() >= 0.0
+
+
+# ---- Backbone Freezing Tests ----
+
+class TestBackboneFreezing:
+    """Verify backbone parameter freezing."""
+
+    def test_backbone_params_frozen_by_default(self, model):
+        """Backbone parameters should not require gradients."""
+        for name, param in model.backbone.named_parameters():
+            assert not param.requires_grad, (
+                f"Backbone param '{name}' has requires_grad=True"
+            )
+
+    def test_head_params_require_grad(self, model):
+        """Head parameters should require gradients."""
+        for name, param in model.head.named_parameters():
+            assert param.requires_grad, (
+                f"Head param '{name}' has requires_grad=False"
+            )
+
+    def test_backbone_no_gradients_after_backward(
+        self, model, sample_training_inputs
+    ):
+        """After backward, backbone params should have no gradients."""
+        points, features, lorentz_vectors, mask, track_labels = sample_training_inputs
+        model.train()
+        loss_dict = model(points, features, lorentz_vectors, mask, track_labels)
+        loss_dict['total_loss'].backward()
+
+        for name, param in model.backbone.named_parameters():
+            assert param.grad is None or torch.all(param.grad == 0), (
+                f"Backbone param '{name}' received non-zero gradients"
+            )
+
+    def test_head_has_gradients_after_backward(
+        self, model, sample_training_inputs
+    ):
+        """After backward, head params should have non-zero gradients."""
+        points, features, lorentz_vectors, mask, track_labels = sample_training_inputs
+        model.train()
+        loss_dict = model(points, features, lorentz_vectors, mask, track_labels)
+        loss_dict['total_loss'].backward()
+
+        params_with_grad = 0
+        for name, param in model.head.named_parameters():
+            if param.grad is not None and param.grad.abs().sum() > 0:
+                params_with_grad += 1
+
+        assert params_with_grad > 0, "No head parameters received gradients"

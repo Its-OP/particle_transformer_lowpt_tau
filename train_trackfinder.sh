@@ -50,6 +50,7 @@ DEVICE="cuda:0"
 # so 1× per epoch is standard. floor(200000 / 64) = 3125.
 STEPS_PER_EPOCH=500
 NUM_WORKERS=4
+NO_COMPILE=false
 
 # ---- Parse extra arguments ----
 EXTRA_ARGS="$*"
@@ -97,6 +98,11 @@ if [ "$FINETUNE_EPOCHS" -gt 0 ]; then
     TRAIN_CMD="${TRAIN_CMD} --finetune-epochs ${FINETUNE_EPOCHS}"
 fi
 
+# Disable torch.compile if requested
+if [ "$NO_COMPILE" = true ]; then
+    TRAIN_CMD="${TRAIN_CMD} --no-compile"
+fi
+
 # Append extra arguments
 TRAIN_CMD="${TRAIN_CMD} ${EXTRA_ARGS}"
 
@@ -130,6 +136,11 @@ echo "LR:         ${LEARNING_RATE}"
 echo "Scheduler:  ${SCHEDULER}"
 echo "Device:     ${DEVICE}"
 echo "AMP:        enabled"
+if [ "$NO_COMPILE" = true ]; then
+    echo "Compile:    disabled"
+else
+    echo "Compile:    enabled (max-autotune)"
+fi
 if [ -n "$PRETRAINED_BACKBONE" ]; then
     echo "Backbone:   ${PRETRAINED_BACKBONE}"
 else

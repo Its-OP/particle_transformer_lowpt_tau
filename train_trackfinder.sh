@@ -46,10 +46,10 @@ LEARNING_RATE=1e-4
 PLATEAU_FACTOR=0.5
 PLATEAU_PATIENCE=5
 DEVICE="cuda:0"
-# ~1× pass per epoch over 15.2K training events (19K × 0.8).
+# ~1× pass per epoch over 200K training events (250K × 0.8).
 # Track finding sees the same labels every epoch (no random masking),
-# so 1× per epoch is standard. floor(15200 / 64) = 237.
-STEPS_PER_EPOCH=237
+# so 1× per epoch is standard. floor(200000 / 64) = 3125.
+STEPS_PER_EPOCH=500
 
 # ---- Parse extra arguments ----
 EXTRA_ARGS="$*"

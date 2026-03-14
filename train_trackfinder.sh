@@ -43,8 +43,7 @@ EPOCHS=50
 FINETUNE_EPOCHS=0
 BATCH_SIZE=64
 LEARNING_RATE=1e-4
-PLATEAU_FACTOR=0.5
-PLATEAU_PATIENCE=5
+SCHEDULER="cosine"
 DEVICE="cuda:0"
 # ~1× pass per epoch over 200K training events (250K × 0.8).
 # Track finding sees the same labels every epoch (no random masking),
@@ -82,8 +81,7 @@ TRAIN_CMD="${CONDA_INIT} && cd ${SCRIPT_DIR} && python train_trackfinder.py \
     --batch-size ${BATCH_SIZE} \
     --steps-per-epoch ${STEPS_PER_EPOCH} \
     --lr ${LEARNING_RATE} \
-    --plateau-factor ${PLATEAU_FACTOR} \
-    --plateau-patience ${PLATEAU_PATIENCE} \
+    --scheduler ${SCHEDULER} \
     --device ${DEVICE} \
     --amp"
 
@@ -127,7 +125,7 @@ echo "Epochs:     ${EPOCHS} (frozen) + ${FINETUNE_EPOCHS} (finetune)"
 echo "Steps/epoch: ${STEPS_PER_EPOCH}"
 echo "Batch size: ${BATCH_SIZE}"
 echo "LR:         ${LEARNING_RATE}"
-echo "Plateau:    factor=${PLATEAU_FACTOR}, patience=${PLATEAU_PATIENCE}"
+echo "Scheduler:  ${SCHEDULER}"
 echo "Device:     ${DEVICE}"
 echo "AMP:        enabled"
 if [ -n "$PRETRAINED_BACKBONE" ]; then

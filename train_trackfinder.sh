@@ -41,8 +41,8 @@ EXPERIMENTS_DIR="experiments"
 PRETRAINED_BACKBONE="models/backbone_best.pt"
 EPOCHS=50
 FINETUNE_EPOCHS=0
-BATCH_SIZE=64
-LEARNING_RATE=1e-4
+BATCH_SIZE=96
+LEARNING_RATE=5e-4
 SCHEDULER="cosine"
 DEVICE="cuda:0"
 # ~1× pass per epoch over 200K training events (250K × 0.8).

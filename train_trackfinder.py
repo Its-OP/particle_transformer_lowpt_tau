@@ -605,6 +605,16 @@ def main():
     file_dict = {'data': parquet_files}
     num_parquet_files = len(parquet_files)
 
+    # Weaver's SimpleIterDataset splits files across DataLoader workers.
+    # num_workers must not exceed the number of parquet files, otherwise
+    # workers with zero files crash: assert (len(new_files) > 0).
+    train_num_workers = min(args.num_workers, num_parquet_files)
+    if train_num_workers < args.num_workers:
+        logger.warning(
+            f'Reducing num_workers from {args.num_workers} to '
+            f'{train_num_workers} (only {num_parquet_files} parquet files)',
+        )
+
     train_dataset = SimpleIterDataset(
         file_dict,
         data_config_file=args.data_config,
@@ -631,14 +641,16 @@ def main():
         batch_size=args.batch_size,
         drop_last=True,
         pin_memory=True,
-        num_workers=args.num_workers,
-        persistent_workers=args.num_workers > 0,
+        num_workers=train_num_workers,
+        persistent_workers=train_num_workers > 0,
     )
     # Validation uses fewer workers than training: validation runs
     # infrequently and for fewer steps, so spawning the same number of
     # workers wastes memory and OS resources. drop_last=True avoids
     # a smaller final batch that can cause uneven GPU memory usage.
-    val_num_workers = max(1, args.num_workers // 2)
+    val_num_workers = min(
+        max(1, train_num_workers // 2), num_parquet_files,
+    )
     val_loader = DataLoader(
         val_dataset,
         batch_size=args.batch_size,
@@ -658,7 +670,7 @@ def main():
         )
     logger.info(f'Steps per epoch: {steps_per_epoch}')
     logger.info(
-        f'DataLoader workers: train={args.num_workers}, '
+        f'DataLoader workers: train={train_num_workers}, '
         f'val={val_num_workers}',
     )
 

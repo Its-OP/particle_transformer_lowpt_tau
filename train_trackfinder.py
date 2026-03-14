@@ -37,6 +37,7 @@ Usage:
         --amp
 """
 import argparse
+import gc
 import json
 import logging
 import math
@@ -48,6 +49,12 @@ from datetime import datetime
 
 import torch
 import torch.nn.functional as functional
+
+# Enable TensorFloat32 (TF32) for float32 matmul on Ampere+ GPUs (RTX 30xx,
+# A100, RTX 40xx/50xx, H100). Uses tensor cores with ~same range as fp32 but
+# reduced mantissa (10 bits vs 23). Negligible accuracy impact, significant
+# speedup for all matrix multiplications (attention, linear layers, Conv1d).
+torch.set_float32_matmul_precision('high')
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
@@ -374,6 +381,9 @@ def train_one_epoch(
                 f'Time: {elapsed:.1f}s',
             )
 
+        # Free batch tensors to reduce peak memory between iterations
+        del inputs, model_inputs, track_labels, loss_dict, loss
+
     # Average losses
     loss_averages = {
         key: value / max(1, num_batches)
@@ -462,6 +472,10 @@ def validate(
                 metrics_accumulators[key] += batch_metrics[key]
 
             num_batches += 1
+
+            # Free batch tensors to reduce peak memory between iterations
+            del inputs, model_inputs, track_labels, loss_dict
+            del logits_dict, mask_tensor, batch_metrics
 
     # Average losses
     loss_averages = {
@@ -620,13 +634,18 @@ def main():
         num_workers=args.num_workers,
         persistent_workers=args.num_workers > 0,
     )
+    # Validation uses fewer workers than training: validation runs
+    # infrequently and for fewer steps, so spawning the same number of
+    # workers wastes memory and OS resources. drop_last=True avoids
+    # a smaller final batch that can cause uneven GPU memory usage.
+    val_num_workers = max(1, args.num_workers // 2)
     val_loader = DataLoader(
         val_dataset,
         batch_size=args.batch_size,
-        drop_last=False,
+        drop_last=True,
         pin_memory=True,
-        num_workers=args.num_workers,
-        persistent_workers=args.num_workers > 0,
+        num_workers=val_num_workers,
+        persistent_workers=val_num_workers > 0,
     )
 
     # ---- Steps per epoch ----
@@ -638,6 +657,10 @@ def main():
             f'Set explicitly as floor(num_train_events / batch_size).',
         )
     logger.info(f'Steps per epoch: {steps_per_epoch}')
+    logger.info(
+        f'DataLoader workers: train={args.num_workers}, '
+        f'val={val_num_workers}',
+    )
 
     # ---- Model ----
     network_module = load_network_module(args.network)
@@ -788,6 +811,13 @@ def main():
             f'conf: {train_losses["confidence_bce_loss"]:.5f}',
         )
 
+        # Free training memory before validation to reduce peak usage.
+        # gc.collect() releases Python-side references (e.g. cached autograd
+        # graphs) so CUDA can reclaim the underlying device memory.
+        gc.collect()
+        if device.type == 'cuda':
+            torch.cuda.empty_cache()
+
         # Validation
         val_steps = max(1, steps_per_epoch // 4)
         val_losses, val_metrics = validate(
@@ -797,6 +827,11 @@ def main():
             max_steps=val_steps,
         )
         val_loss = val_losses['total_loss']
+
+        # Free validation memory before resuming training
+        gc.collect()
+        if device.type == 'cuda':
+            torch.cuda.empty_cache()
 
         is_best = val_loss < best_val_loss
         if is_best:
@@ -981,6 +1016,11 @@ def main():
                 f'conf: {train_losses["confidence_bce_loss"]:.5f}',
             )
 
+            # Free training memory before validation
+            gc.collect()
+            if device.type == 'cuda':
+                torch.cuda.empty_cache()
+
             val_steps = max(1, steps_per_epoch // 4)
             val_losses, val_metrics = validate(
                 model, val_loader, device, data_config,
@@ -989,6 +1029,11 @@ def main():
                 max_steps=val_steps,
             )
             val_loss = val_losses['total_loss']
+
+            # Free validation memory before resuming training
+            gc.collect()
+            if device.type == 'cuda':
+                torch.cuda.empty_cache()
 
             is_best = val_loss < best_val_loss
             if is_best:

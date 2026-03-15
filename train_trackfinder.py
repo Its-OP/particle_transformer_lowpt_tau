@@ -36,6 +36,8 @@ Usage:
         --device cuda:0 \\
         --amp
 """
+from __future__ import annotations
+
 import argparse
 import gc
 import json
@@ -46,6 +48,10 @@ import sys
 import time
 import traceback
 from datetime import datetime
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from torch.utils.tensorboard import SummaryWriter
 
 import torch
 import torch.nn.functional as functional
@@ -56,7 +62,6 @@ import torch.nn.functional as functional
 # speedup for all matrix multiplications (attention, linear layers, Conv1d).
 torch.set_float32_matmul_precision('high')
 from torch.utils.data import DataLoader
-from torch.utils.tensorboard import SummaryWriter
 
 from weaver.utils.dataset import SimpleIterDataset
 
@@ -694,6 +699,7 @@ def main():
     logger.info(f'Arguments: {vars(args)}')
 
     # ---- TensorBoard ----
+    from torch.utils.tensorboard import SummaryWriter
     tensorboard_writer = SummaryWriter(log_dir=tensorboard_dir)
 
     # ---- Data loading ----

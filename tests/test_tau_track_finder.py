@@ -357,13 +357,17 @@ class TestArchitecture:
             "query norms bounded and preserve cross-attention contributions"
         )
 
-    def test_encoder_uses_pre_norm(self, model):
-        """Encoder should still use pre-norm (norm_first=True) — it works
-        fine (cross-event cosine sim ≈ 0.97 shows input dependence).
+    def test_encoder_uses_post_norm(self, model):
+        """Encoder should use post-norm (norm_first=False) to preserve
+        event-specific variation in compact tokens.
+
+        Pre-norm caused cross-event cosine similarity ~0.97 in encoded
+        compact tokens — only ~3% of the representation was event-specific.
+        Original DETR uses post-norm for both encoder and decoder.
         """
         encoder_layer = model.head.transformer_encoder.layers[0]
-        assert encoder_layer.norm_first is True, (
-            "Encoder should use pre-norm (norm_first=True)"
+        assert encoder_layer.norm_first is False, (
+            "Encoder should use post-norm (norm_first=False)"
         )
 
     def test_pointer_context_projection_exists(self, model):

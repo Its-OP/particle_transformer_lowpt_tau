@@ -3,7 +3,7 @@
 Tests cover:
     - Forward pass smoke test: random input → finite loss, correct shapes
     - Hungarian matching: cost matrix shape, matched indices validity
-    - Loss components: pointer focal loss and confidence BCE are finite and non-negative
+    - Loss components: pointer CE loss and confidence BCE are finite and non-negative
     - GT extraction: correct extraction of up to 6 tau-track indices from labels
     - Zero GT event: all confidence targets = 0, no pointer loss
     - Backbone freezing: backbone params have requires_grad=False

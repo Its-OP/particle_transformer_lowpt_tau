@@ -9,10 +9,15 @@ Tests cover:
     - Backbone freezing: backbone params have requires_grad=False
     - Architecture: decoder post-norm, pointer context projection, confidence head dims
     - Configuration: eos_coef (no-object weight) configurability
+    - Checkpoint management: rolling top-K best checkpoint pruning
 """
+import os
+import tempfile
+
 import pytest
 import torch
 
+from train_trackfinder import CheckpointManager
 from weaver.nn.model.TauTrackFinder import TauTrackFinder
 
 
@@ -471,3 +476,133 @@ class TestNoObjectWeight:
             "Different no_object_weight values should produce different "
             "confidence losses"
         )
+
+
+# ---- Checkpoint Management Tests ----
+
+class TestCheckpointManager:
+    """Verify rolling top-K best checkpoint pruning."""
+
+    def test_keeps_top_k_checkpoints(self):
+        """Should delete checkpoints beyond top K by val_loss."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            manager = CheckpointManager(
+                checkpoints_directory=temporary_directory,
+                keep_best_k=3,
+            )
+
+            # Save 5 checkpoints with decreasing quality (higher val_loss)
+            for epoch in range(1, 6):
+                checkpoint_data = {'epoch': epoch, 'val_loss': epoch * 0.1}
+                manager.save_checkpoint(
+                    checkpoint_data,
+                    epoch=epoch,
+                    val_loss=epoch * 0.1,
+                    is_best=(epoch == 1),
+                )
+
+            # Should keep top 3 (epochs 1, 2, 3 with losses 0.1, 0.2, 0.3)
+            remaining_files = [
+                filename for filename in os.listdir(temporary_directory)
+                if filename.startswith('checkpoint_epoch_')
+            ]
+            assert len(remaining_files) == 3
+
+            # Best 3 should exist
+            assert os.path.exists(os.path.join(
+                temporary_directory, 'checkpoint_epoch_1.pt',
+            ))
+            assert os.path.exists(os.path.join(
+                temporary_directory, 'checkpoint_epoch_2.pt',
+            ))
+            assert os.path.exists(os.path.join(
+                temporary_directory, 'checkpoint_epoch_3.pt',
+            ))
+
+            # Worst 2 should be deleted
+            assert not os.path.exists(os.path.join(
+                temporary_directory, 'checkpoint_epoch_4.pt',
+            ))
+            assert not os.path.exists(os.path.join(
+                temporary_directory, 'checkpoint_epoch_5.pt',
+            ))
+
+    def test_best_model_always_preserved(self):
+        """best_model.pt should always exist even after pruning."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            manager = CheckpointManager(
+                checkpoints_directory=temporary_directory,
+                keep_best_k=2,
+            )
+
+            # First checkpoint is best
+            manager.save_checkpoint(
+                {'epoch': 1}, epoch=1, val_loss=0.5, is_best=True,
+            )
+            # Second is worse
+            manager.save_checkpoint(
+                {'epoch': 2}, epoch=2, val_loss=0.8, is_best=False,
+            )
+            # Third is better than both — new best
+            manager.save_checkpoint(
+                {'epoch': 3}, epoch=3, val_loss=0.3, is_best=True,
+            )
+
+            # best_model.pt should exist (never pruned)
+            assert os.path.exists(os.path.join(
+                temporary_directory, 'best_model.pt',
+            ))
+
+    def test_keep_best_k_zero_disables_pruning(self):
+        """Setting keep_best_k=0 should keep all checkpoints."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            manager = CheckpointManager(
+                checkpoints_directory=temporary_directory,
+                keep_best_k=0,
+            )
+
+            for epoch in range(1, 8):
+                manager.save_checkpoint(
+                    {'epoch': epoch},
+                    epoch=epoch,
+                    val_loss=epoch * 0.1,
+                    is_best=(epoch == 1),
+                )
+
+            # All 7 checkpoint files should remain
+            remaining_files = [
+                filename for filename in os.listdir(temporary_directory)
+                if filename.startswith('checkpoint_epoch_')
+            ]
+            assert len(remaining_files) == 7
+
+    def test_later_better_checkpoint_evicts_earlier_worse(self):
+        """A later checkpoint with better loss should evict the worst tracked."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            manager = CheckpointManager(
+                checkpoints_directory=temporary_directory,
+                keep_best_k=2,
+            )
+
+            # Save 3 checkpoints: 0.5, 0.8, 0.3
+            manager.save_checkpoint(
+                {'epoch': 1}, epoch=1, val_loss=0.5, is_best=True,
+            )
+            manager.save_checkpoint(
+                {'epoch': 2}, epoch=2, val_loss=0.8, is_best=False,
+            )
+            manager.save_checkpoint(
+                {'epoch': 3}, epoch=3, val_loss=0.3, is_best=True,
+            )
+
+            # Top 2 are: epoch 3 (0.3) and epoch 1 (0.5)
+            # Epoch 2 (0.8) should be deleted
+            assert os.path.exists(os.path.join(
+                temporary_directory, 'checkpoint_epoch_3.pt',
+            ))
+            assert os.path.exists(os.path.join(
+                temporary_directory, 'checkpoint_epoch_1.pt',
+            ))
+            assert not os.path.exists(os.path.join(
+                temporary_directory, 'checkpoint_epoch_2.pt',
+            ))

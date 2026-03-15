@@ -75,6 +75,100 @@ from pretrain_backbone import (
 logger = logging.getLogger('train_trackfinder')
 
 
+class CheckpointManager:
+    """Manages rolling top-K best checkpoints to limit disk usage.
+
+    Tracks saved checkpoint files ranked by validation loss and deletes
+    those that fall outside the top K. The special ``best_model.pt`` file
+    is always maintained as a copy of the rank-1 checkpoint.
+
+    Args:
+        checkpoints_directory: Path to the checkpoints directory.
+        keep_best_k: Maximum number of best checkpoints to retain.
+            When a new checkpoint is saved and the count exceeds this limit,
+            the checkpoint with the worst (highest) validation loss is deleted.
+            Set to 0 to disable cleanup (keep all checkpoints).
+    """
+
+    def __init__(
+        self,
+        checkpoints_directory: str,
+        keep_best_k: int = 5,
+    ):
+        self.checkpoints_directory = checkpoints_directory
+        self.keep_best_k = keep_best_k
+        # Sorted list of (val_loss, epoch, filepath) — best (lowest loss) first
+        self.tracked_checkpoints: list[tuple[float, int, str]] = []
+
+    def save_checkpoint(
+        self,
+        checkpoint_data: dict,
+        epoch: int,
+        val_loss: float,
+        is_best: bool,
+    ) -> str:
+        """Save a checkpoint and prune old ones if exceeding keep_best_k.
+
+        Always saves ``checkpoint_epoch_{epoch}.pt``. If ``is_best``, also
+        saves/overwrites ``best_model.pt``. Then prunes the tracked list
+        so only the top-K checkpoints (by val_loss) remain on disk.
+
+        Args:
+            checkpoint_data: Dict containing model_state_dict, optimizer, etc.
+            epoch: Current epoch number.
+            val_loss: Validation loss for this checkpoint.
+            is_best: Whether this is a new overall best.
+
+        Returns:
+            Path to the saved checkpoint file.
+        """
+        checkpoint_path = os.path.join(
+            self.checkpoints_directory, f'checkpoint_epoch_{epoch}.pt',
+        )
+        torch.save(checkpoint_data, checkpoint_path)
+        logger.info(f'Saved checkpoint: {checkpoint_path}')
+
+        # Track this checkpoint for pruning
+        self.tracked_checkpoints.append((val_loss, epoch, checkpoint_path))
+        # Sort by val_loss ascending (best first)
+        self.tracked_checkpoints.sort(key=lambda entry: entry[0])
+
+        # Save best_model.pt as a copy of the overall best
+        if is_best:
+            best_path = os.path.join(
+                self.checkpoints_directory, 'best_model.pt',
+            )
+            torch.save(checkpoint_data, best_path)
+            logger.info(f'New best model (val_loss={val_loss:.5f})')
+
+        # Prune checkpoints beyond the top K
+        self._prune_checkpoints()
+
+        return checkpoint_path
+
+    def _prune_checkpoints(self):
+        """Delete tracked checkpoints that fall outside the top-K best.
+
+        Skips pruning if keep_best_k is 0 (unlimited) or if the number
+        of tracked checkpoints does not exceed the limit. Never deletes
+        ``best_model.pt`` (it's not tracked in the list).
+        """
+        if self.keep_best_k <= 0:
+            return
+
+        while len(self.tracked_checkpoints) > self.keep_best_k:
+            # Remove the worst (last in sorted list)
+            worst_loss, worst_epoch, worst_path = (
+                self.tracked_checkpoints.pop()
+            )
+            if os.path.exists(worst_path):
+                os.remove(worst_path)
+                logger.info(
+                    f'Pruned checkpoint: epoch {worst_epoch} '
+                    f'(val_loss={worst_loss:.5f})',
+                )
+
+
 def setup_logging(experiment_dir: str):
     """Configure logging to both stdout and a log file.
 
@@ -569,6 +663,11 @@ def main():
                              'BCE. Downweights empty targets (default: 0.1)')
     parser.add_argument('--save-every', type=int, default=10,
                         help='Save checkpoint every N epochs')
+    parser.add_argument('--keep-best-k', type=int, default=5,
+                        help='Keep only the K best checkpoints by val loss. '
+                             'Older checkpoints outside the top K are deleted '
+                             'to save disk space. Set to 0 to keep all '
+                             'checkpoints (default: 5)')
     parser.add_argument('--resume', type=str, default=None,
                         help='Path to checkpoint to resume from')
     args = parser.parse_args()
@@ -789,6 +888,16 @@ def main():
     # ---- Mixed precision ----
     grad_scaler = torch.amp.GradScaler('cuda') if args.amp else None
 
+    # ---- Checkpoint manager ----
+    checkpoint_manager = CheckpointManager(
+        checkpoints_directory=checkpoints_dir,
+        keep_best_k=args.keep_best_k,
+    )
+    logger.info(
+        f'Checkpoint management: keep_best_k={args.keep_best_k} '
+        f'({"unlimited" if args.keep_best_k == 0 else f"top {args.keep_best_k}"})',
+    )
+
     # ---- Resume from checkpoint ----
     start_epoch = 1
     best_val_loss = float('inf')
@@ -950,16 +1059,9 @@ def main():
                 'args': vars(args),
             }
 
-            checkpoint_path = os.path.join(
-                checkpoints_dir, f'checkpoint_epoch_{epoch}.pt',
+            checkpoint_manager.save_checkpoint(
+                checkpoint, epoch, val_loss, is_best,
             )
-            torch.save(checkpoint, checkpoint_path)
-            logger.info(f'Saved checkpoint: {checkpoint_path}')
-
-            if is_best:
-                best_path = os.path.join(checkpoints_dir, 'best_model.pt')
-                torch.save(checkpoint, best_path)
-                logger.info(f'New best model (val_loss={val_loss:.5f})')
 
     # ---- Phase 2: Fine-tuning with unfrozen backbone (optional) ----
     if args.finetune_epochs > 0:
@@ -1130,20 +1232,9 @@ def main():
                     'args': vars(args),
                 }
 
-                checkpoint_path = os.path.join(
-                    checkpoints_dir, f'checkpoint_epoch_{epoch}.pt',
+                checkpoint_manager.save_checkpoint(
+                    checkpoint, epoch, val_loss, is_best,
                 )
-                torch.save(checkpoint, checkpoint_path)
-                logger.info(f'Saved checkpoint: {checkpoint_path}')
-
-                if is_best:
-                    best_path = os.path.join(
-                        checkpoints_dir, 'best_model.pt',
-                    )
-                    torch.save(checkpoint, best_path)
-                    logger.info(
-                        f'New best model (val_loss={val_loss:.5f})',
-                    )
 
     # ---- Final outputs ----
     tensorboard_writer.close()

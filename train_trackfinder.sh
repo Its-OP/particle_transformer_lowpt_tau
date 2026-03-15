@@ -58,6 +58,8 @@ CONFIDENCE_LOSS_WEIGHT=5.0
 # DETR-style no-object coefficient (eos_coef):
 # Downweights empty (∅) targets in confidence BCE to prevent trivial solutions
 EOS_COEF=0.1
+# Keep top K best checkpoints by val loss (0 = keep all, for CERN cluster runs)
+KEEP_BEST_K=5
 
 # ---- Parse extra arguments ----
 # Check if --no-compile was passed via CLI and update the variable
@@ -105,6 +107,7 @@ TRAIN_CMD="${CONDA_INIT} && cd ${SCRIPT_DIR} && python train_trackfinder.py \
     --pointer-loss-weight ${POINTER_LOSS_WEIGHT} \
     --confidence-loss-weight ${CONFIDENCE_LOSS_WEIGHT} \
     --eos-coef ${EOS_COEF} \
+    --keep-best-k ${KEEP_BEST_K} \
     --amp"
 
 # Add pretrained backbone if specified

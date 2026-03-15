@@ -7,6 +7,8 @@ Tests cover:
     - GT extraction: correct extraction of up to 6 tau-track indices from labels
     - Zero GT event: all confidence targets = 0, no pointer loss
     - Backbone freezing: backbone params have requires_grad=False
+    - Architecture: decoder post-norm, pointer context projection, confidence head dims
+    - Configuration: eos_coef (no-object weight) configurability
 """
 import pytest
 import torch
@@ -328,3 +330,144 @@ class TestBackboneFreezing:
                 params_with_grad += 1
 
         assert params_with_grad > 0, "No head parameters received gradients"
+
+
+# ---- Architecture Tests ----
+
+class TestArchitecture:
+    """Verify architecture changes for decoder and confidence head."""
+
+    def test_decoder_uses_post_norm(self, model):
+        """Decoder should use post-norm (norm_first=False) to prevent query
+        norm explosion that makes cross-attention contributions negligible.
+
+        Original DETR (Carion et al., ECCV 2020) uses post-norm. Pre-norm
+        caused query norms to grow from ~1 to ~598 across 6 layers, making
+        decoded queries input-independent (cosine sim = 1.0000 across events).
+        """
+        # Access the first decoder layer to check norm_first
+        decoder_layer = model.head.transformer_decoder.layers[0]
+        assert decoder_layer.norm_first is False, (
+            "Decoder should use post-norm (norm_first=False) to keep "
+            "query norms bounded and preserve cross-attention contributions"
+        )
+
+    def test_encoder_uses_pre_norm(self, model):
+        """Encoder should still use pre-norm (norm_first=True) — it works
+        fine (cross-event cosine sim ≈ 0.97 shows input dependence).
+        """
+        encoder_layer = model.head.transformer_encoder.layers[0]
+        assert encoder_layer.norm_first is True, (
+            "Encoder should use pre-norm (norm_first=True)"
+        )
+
+    def test_pointer_context_projection_exists(self, model):
+        """Head should have a pointer_context_projection module for computing
+        soft-attention readout of enriched features for the confidence head.
+        """
+        assert hasattr(model.head, 'pointer_context_projection'), (
+            "TauTrackFinderHead should have pointer_context_projection"
+        )
+
+    def test_confidence_head_input_dim_is_double_decoder_dim(self, model):
+        """Confidence head input should be 2 * decoder_dim (decoded query
+        + pointed context) to break the constant-logit equilibrium.
+        """
+        # The first layer of confidence_head is Linear(2*decoder_dim, pointer_dim)
+        first_linear = model.head.confidence_head[0]
+        expected_input_dim = 2 * model.head.decoder_dim
+        assert first_linear.in_features == expected_input_dim, (
+            f"Confidence head input dim should be {expected_input_dim} "
+            f"(2 × decoder_dim), got {first_linear.in_features}"
+        )
+
+    def test_pointer_context_gradient_flow(self, model, sample_training_inputs):
+        """Confidence loss should flow gradients through pointer_context_projection
+        and into pointer_logits, providing additional training signal.
+
+        Gradient path: confidence_loss → confidence_head → pointed_context
+        → pointer_probabilities → pointer_logits
+        """
+        points, features, lorentz_vectors, mask, track_labels = sample_training_inputs
+        model.train()
+        loss_dict = model(points, features, lorentz_vectors, mask, track_labels)
+        loss_dict['total_loss'].backward()
+
+        # pointer_context_projection should receive gradients
+        has_gradient = False
+        for param in model.head.pointer_context_projection.parameters():
+            if param.grad is not None and param.grad.abs().sum() > 0:
+                has_gradient = True
+                break
+        assert has_gradient, (
+            "pointer_context_projection should receive gradients from "
+            "confidence loss backpropagation"
+        )
+
+
+# ---- No-Object Weight (eos_coef) Configuration Tests ----
+
+class TestNoObjectWeight:
+    """Verify eos_coef (no-object weight) configurability."""
+
+    def test_default_no_object_weight(self):
+        """Default no_object_weight should be 0.1."""
+        default_model = TauTrackFinder(
+            backbone_kwargs=_make_backbone_kwargs(),
+            decoder_kwargs=_make_decoder_kwargs(),
+        )
+        assert default_model.no_object_weight == 0.1
+
+    def test_custom_no_object_weight(self):
+        """no_object_weight should be configurable via constructor."""
+        custom_model = TauTrackFinder(
+            backbone_kwargs=_make_backbone_kwargs(),
+            decoder_kwargs=_make_decoder_kwargs(),
+            no_object_weight=0.5,
+        )
+        assert custom_model.no_object_weight == 0.5
+
+    def test_no_object_weight_affects_loss(self):
+        """Different eos_coef values should produce different confidence losses
+        for the same inputs, because unmatched queries are weighted differently.
+        """
+        points, features, lorentz_vectors = _make_physical_inputs(
+            2, NUM_TRACKS, seed=42,
+        )
+        mask = torch.ones(2, 1, NUM_TRACKS)
+        track_labels = torch.zeros(2, 1, NUM_TRACKS)
+        track_labels[0, 0, 10] = 1.0
+        track_labels[1, 0, 20] = 1.0
+
+        model_low_eos = TauTrackFinder(
+            backbone_kwargs=_make_backbone_kwargs(),
+            decoder_kwargs=_make_decoder_kwargs(),
+            no_object_weight=0.1,
+        )
+        model_high_eos = TauTrackFinder(
+            backbone_kwargs=_make_backbone_kwargs(),
+            decoder_kwargs=_make_decoder_kwargs(),
+            no_object_weight=1.0,
+        )
+
+        # Copy weights from low to high so only eos_coef differs
+        model_high_eos.load_state_dict(model_low_eos.state_dict())
+
+        model_low_eos.train()
+        model_high_eos.train()
+
+        loss_low = model_low_eos(
+            points, features, lorentz_vectors, mask, track_labels,
+        )
+        loss_high = model_high_eos(
+            points, features, lorentz_vectors, mask, track_labels,
+        )
+
+        # With different eos_coef, the confidence BCE loss should differ
+        # because unmatched queries (the majority) are weighted differently
+        assert loss_low['confidence_bce_loss'].item() != pytest.approx(
+            loss_high['confidence_bce_loss'].item(), abs=1e-6,
+        ), (
+            "Different no_object_weight values should produce different "
+            "confidence losses"
+        )

@@ -564,6 +564,9 @@ def main():
                         help='Weight for pointer focal loss (default: 2.0)')
     parser.add_argument('--confidence-loss-weight', type=float, default=5.0,
                         help='Weight for confidence BCE loss (default: 5.0)')
+    parser.add_argument('--eos-coef', type=float, default=0.1,
+                        help='DETR-style no-object coefficient for confidence '
+                             'BCE. Downweights empty targets (default: 0.1)')
     parser.add_argument('--save-every', type=int, default=10,
                         help='Save checkpoint every N epochs')
     parser.add_argument('--resume', type=str, default=None,
@@ -693,6 +696,7 @@ def main():
     # Loss weights: rebalanced from ptr=5.0/conf=1.0 to ptr=2.0/conf=5.0
     model_kwargs['pointer_loss_weight'] = args.pointer_loss_weight
     model_kwargs['confidence_loss_weight'] = args.confidence_loss_weight
+    model_kwargs['eos_coef'] = args.eos_coef
 
     model, model_info = network_module.get_model(data_config, **model_kwargs)
     model = model.to(device)
@@ -709,7 +713,8 @@ def main():
     logger.info(f'Input names: {data_config.input_names}')
     logger.info(
         f'Loss weights: pointer={args.pointer_loss_weight}, '
-        f'confidence={args.confidence_loss_weight}',
+        f'confidence={args.confidence_loss_weight}, '
+        f'eos_coef={args.eos_coef}',
     )
 
     # Find input indices for pf_mask and pf_label

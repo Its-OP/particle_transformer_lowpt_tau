@@ -24,6 +24,8 @@ def get_model(data_config, **kwargs):
         num_decoder_layers: Number of query decoder layers (default: 6).
         pointer_loss_weight: Weight for pointer focal loss (default: 2.0).
         confidence_loss_weight: Weight for confidence BCE loss (default: 5.0).
+        eos_coef: DETR-style no-object coefficient for confidence BCE (default: 0.1).
+            Downweights empty (∅) targets to prevent trivial "always empty" solution.
     """
     pretrained_backbone_path = kwargs.pop('pretrained_backbone_path', None)
     backbone_frozen = kwargs.pop('backbone_frozen', True)
@@ -35,6 +37,11 @@ def get_model(data_config, **kwargs):
     # so confidence loss receives meaningful gradient signal
     pointer_loss_weight = kwargs.pop('pointer_loss_weight', 2.0)
     confidence_loss_weight = kwargs.pop('confidence_loss_weight', 5.0)
+
+    # DETR-style no-object coefficient (Carion et al., ECCV 2020):
+    # Downweights empty (∅) targets in confidence BCE to prevent the model
+    # from trivially minimizing loss by always predicting "no object".
+    eos_coef = kwargs.pop('eos_coef', 0.1)
 
     input_dim = len(data_config.input_dicts['pf_features'])
 
@@ -76,6 +83,7 @@ def get_model(data_config, **kwargs):
         decoder_kwargs=decoder_kwargs,
         pointer_loss_weight=pointer_loss_weight,
         confidence_loss_weight=confidence_loss_weight,
+        no_object_weight=eos_coef,
     )
     configuration.update(**kwargs)
     _logger.info('Model config: %s' % str(configuration))

@@ -650,6 +650,10 @@ def main():
                         help='Enable mixed precision training')
     parser.add_argument('--no-compile', action='store_true',
                         help='Disable torch.compile')
+    parser.add_argument('--no-in-memory', action='store_true',
+                        help='Stream data from disk instead of loading '
+                             'entire dataset into memory. Slower but uses '
+                             'much less RAM — use for local smoke tests.')
     parser.add_argument('--steps-per-epoch', type=int, default=None,
                         help='Training batches per epoch (required for '
                              'infinite SimpleIterDataset)')
@@ -727,6 +731,10 @@ def main():
             f'{train_num_workers} (only {num_parquet_files} parquet files)',
         )
 
+    load_in_memory = not args.no_in_memory
+    if args.no_in_memory:
+        logger.info('Streaming data from disk (--no-in-memory)')
+
     train_dataset = SimpleIterDataset(
         file_dict,
         data_config_file=args.data_config,
@@ -734,7 +742,7 @@ def main():
         load_range_and_fraction=((0.0, args.train_fraction), 1.0),
         fetch_by_files=True,
         fetch_step=num_parquet_files,
-        in_memory=True,
+        in_memory=load_in_memory,
     )
     data_config = train_dataset.config
 
@@ -745,7 +753,7 @@ def main():
         load_range_and_fraction=((args.train_fraction, 1.0), 1.0),
         fetch_by_files=True,
         fetch_step=num_parquet_files,
-        in_memory=True,
+        in_memory=load_in_memory,
     )
 
     train_loader = DataLoader(
@@ -762,7 +770,7 @@ def main():
     # a smaller final batch that can cause uneven GPU memory usage.
     val_num_workers = min(
         max(1, train_num_workers // 2), num_parquet_files,
-    )
+    ) if train_num_workers > 0 else 0
     val_loader = DataLoader(
         val_dataset,
         batch_size=args.batch_size,
@@ -841,9 +849,15 @@ def main():
         and hasattr(torch, 'compile')
     )
     if use_compile:
+        # Silence verbose inductor/dynamo benchmarking logs during
+        # max-autotune compilation (thousands of lines otherwise).
+        import logging as _logging
+        _logging.getLogger('torch._inductor').setLevel(_logging.WARNING)
+        _logging.getLogger('torch._dynamo').setLevel(_logging.WARNING)
+
         logger.info(
             'Compiling model with torch.compile '
-            '(mode="default", dynamic=True)...',
+            '(mode="max-autotune", dynamic=True)...',
         )
         model = torch.compile(model, mode='max-autotune', dynamic=True)
         logger.info('Model compiled.')

@@ -22,12 +22,19 @@ def get_model(data_config, **kwargs):
         num_enrichment_layers: Number of enrichment layers (default: 5).
         num_encoder_layers: Number of compact token encoder layers (default: 6).
         num_decoder_layers: Number of query decoder layers (default: 6).
+        pointer_loss_weight: Weight for pointer focal loss (default: 2.0).
+        confidence_loss_weight: Weight for confidence BCE loss (default: 5.0).
     """
     pretrained_backbone_path = kwargs.pop('pretrained_backbone_path', None)
     backbone_frozen = kwargs.pop('backbone_frozen', True)
     num_enrichment_layers = kwargs.pop('num_enrichment_layers', 5)
     num_encoder_layers = kwargs.pop('num_encoder_layers', 6)
     num_decoder_layers = kwargs.pop('num_decoder_layers', 6)
+
+    # Loss weights: rebalanced from ptr=5.0/conf=1.0 to ptr=2.0/conf=5.0
+    # so confidence loss receives meaningful gradient signal
+    pointer_loss_weight = kwargs.pop('pointer_loss_weight', 2.0)
+    confidence_loss_weight = kwargs.pop('confidence_loss_weight', 5.0)
 
     input_dim = len(data_config.input_dicts['pf_features'])
 
@@ -67,6 +74,8 @@ def get_model(data_config, **kwargs):
     configuration = dict(
         backbone_kwargs=backbone_kwargs,
         decoder_kwargs=decoder_kwargs,
+        pointer_loss_weight=pointer_loss_weight,
+        confidence_loss_weight=confidence_loss_weight,
     )
     configuration.update(**kwargs)
     _logger.info('Model config: %s' % str(configuration))

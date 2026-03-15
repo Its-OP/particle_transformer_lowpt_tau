@@ -560,6 +560,10 @@ def main():
                         help='Number of compact token encoder layers')
     parser.add_argument('--num-decoder-layers', type=int, default=None,
                         help='Number of query decoder layers')
+    parser.add_argument('--pointer-loss-weight', type=float, default=2.0,
+                        help='Weight for pointer focal loss (default: 2.0)')
+    parser.add_argument('--confidence-loss-weight', type=float, default=5.0,
+                        help='Weight for confidence BCE loss (default: 5.0)')
     parser.add_argument('--save-every', type=int, default=10,
                         help='Save checkpoint every N epochs')
     parser.add_argument('--resume', type=str, default=None,
@@ -686,6 +690,10 @@ def main():
     if args.num_decoder_layers is not None:
         model_kwargs['num_decoder_layers'] = args.num_decoder_layers
 
+    # Loss weights: rebalanced from ptr=5.0/conf=1.0 to ptr=2.0/conf=5.0
+    model_kwargs['pointer_loss_weight'] = args.pointer_loss_weight
+    model_kwargs['confidence_loss_weight'] = args.confidence_loss_weight
+
     model, model_info = network_module.get_model(data_config, **model_kwargs)
     model = model.to(device)
 
@@ -699,6 +707,10 @@ def main():
         f'Frozen: {total_params - trainable_params:,}',
     )
     logger.info(f'Input names: {data_config.input_names}')
+    logger.info(
+        f'Loss weights: pointer={args.pointer_loss_weight}, '
+        f'confidence={args.confidence_loss_weight}',
+    )
 
     # Find input indices for pf_mask and pf_label
     input_names = list(data_config.input_names)

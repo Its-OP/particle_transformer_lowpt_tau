@@ -162,7 +162,7 @@ class TestForwardPass:
         loss_dict = model(points, features, lorentz_vectors, mask, track_labels)
 
         assert loss_dict['total_loss'].item() >= 0.0
-        assert loss_dict['pointer_focal_loss'].item() >= 0.0
+        assert loss_dict['pointer_ce_loss'].item() >= 0.0
         assert loss_dict['confidence_bce_loss'].item() >= 0.0
 
 
@@ -176,7 +176,7 @@ class TestLossComponents:
         model.train()
         loss_dict = model(points, features, lorentz_vectors, mask, track_labels)
 
-        assert 'pointer_focal_loss' in loss_dict
+        assert 'pointer_ce_loss' in loss_dict
         assert 'confidence_bce_loss' in loss_dict
         assert 'total_loss' in loss_dict
 
@@ -194,7 +194,7 @@ class TestLossComponents:
         loss_dict = model(points, features, lorentz_vectors, mask, track_labels)
 
         expected_total = (
-            model.pointer_loss_weight * loss_dict['pointer_focal_loss']
+            model.pointer_loss_weight * loss_dict['pointer_ce_loss']
             + model.confidence_loss_weight * loss_dict['confidence_bce_loss']
         )
         torch.testing.assert_close(
@@ -275,7 +275,7 @@ class TestZeroGroundTruth:
 
         assert torch.isfinite(loss_dict['total_loss']).all()
         # Pointer loss should be 0 (no matched queries)
-        assert loss_dict['pointer_focal_loss'].item() == 0.0
+        assert loss_dict['pointer_ce_loss'].item() == 0.0
         # Confidence loss should still be computed (all targets = 0)
         assert loss_dict['confidence_bce_loss'].item() >= 0.0
 

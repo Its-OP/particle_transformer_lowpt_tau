@@ -51,6 +51,10 @@ DEVICE="cuda:0"
 STEPS_PER_EPOCH=500
 NUM_WORKERS=4
 NO_COMPILE=false
+# Loss weights: rebalanced from ptr=5.0/conf=1.0 to ptr=2.0/conf=5.0
+# so confidence loss receives meaningful gradient signal
+POINTER_LOSS_WEIGHT=2.0
+CONFIDENCE_LOSS_WEIGHT=5.0
 
 # ---- Parse extra arguments ----
 # Check if --no-compile was passed via CLI and update the variable
@@ -95,6 +99,8 @@ TRAIN_CMD="${CONDA_INIT} && cd ${SCRIPT_DIR} && python train_trackfinder.py \
     --scheduler ${SCHEDULER} \
     --device ${DEVICE} \
     --num-workers ${NUM_WORKERS} \
+    --pointer-loss-weight ${POINTER_LOSS_WEIGHT} \
+    --confidence-loss-weight ${CONFIDENCE_LOSS_WEIGHT} \
     --amp"
 
 # Add pretrained backbone if specified
@@ -144,6 +150,7 @@ echo "Batch size: ${BATCH_SIZE}"
 echo "LR:         ${LEARNING_RATE}"
 echo "Scheduler:  ${SCHEDULER}"
 echo "Device:     ${DEVICE}"
+echo "Loss wts:   ptr=${POINTER_LOSS_WEIGHT}, conf=${CONFIDENCE_LOSS_WEIGHT}"
 echo "AMP:        enabled"
 if [ "$NO_COMPILE" = true ]; then
     echo "Compile:    disabled"

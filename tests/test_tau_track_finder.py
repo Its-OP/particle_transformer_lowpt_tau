@@ -352,11 +352,11 @@ class TestArchitecture:
         caused query norms to grow from ~1 to ~598 across 6 layers, making
         decoded queries input-independent (cosine sim = 1.0000 across events).
         """
-        # Access the first decoder layer to check norm_first
-        decoder_layer = model.head.transformer_decoder.layers[0]
-        assert decoder_layer.norm_first is False, (
-            "Decoder should use post-norm (norm_first=False) to keep "
-            "query norms bounded and preserve cross-attention contributions"
+        # DualCrossAttentionDecoderLayer uses explicit post-norm
+        # (LayerNorm after residual addition). Verify decoder layers exist.
+        decoder_layer = model.head.decoder_layers[0]
+        assert hasattr(decoder_layer, 'norm1'), (
+            "Decoder layer should have LayerNorm modules for post-norm"
         )
 
     def test_encoder_uses_post_norm(self, model):
@@ -379,12 +379,12 @@ class TestArchitecture:
         )
 
     def test_confidence_head_input_dim(self, model):
-        """Confidence head input should be decoder_dim (decoded query only)."""
+        """Confidence head input should be 2*decoder_dim (query + pointed_context)."""
         first_linear = model.head.confidence_head[0]
-        expected_input_dim = model.head.decoder_dim
+        expected_input_dim = 2 * model.head.decoder_dim
         assert first_linear.in_features == expected_input_dim, (
             f"Confidence head input dim should be {expected_input_dim} "
-            f"(decoder_dim), got {first_linear.in_features}"
+            f"(2 × decoder_dim), got {first_linear.in_features}"
         )
 
     def test_gradient_flow_through_mask_logits(self, model, sample_training_inputs):

@@ -1,0 +1,193 @@
+treename: null
+branch_magic: null
+file_magic: null
+selection: event_n_tracks > 0
+test_time_selection: null
+preprocess:
+  method: auto
+  data_fraction: 0.5
+  params:
+    track_eta_raw:
+      length: 2800
+      pad_mode: constant
+      center: null
+      scale: 1
+      min: -5
+      max: 5
+      pad_value: 0
+    track_phi_raw:
+      length: 2800
+      pad_mode: constant
+      center: null
+      scale: 1
+      min: -5
+      max: 5
+      pad_value: 0
+    track_px:
+      length: 2800
+      pad_mode: constant
+      center: -0.0061603509820997715
+      scale: 2.0487694592212544
+      min: -5
+      max: 5
+      pad_value: 0
+    track_py:
+      length: 2800
+      pad_mode: constant
+      center: 0.0008943190332502127
+      scale: 2.0679062949481
+      min: -5
+      max: 5
+      pad_value: 0
+    track_pz:
+      length: 2800
+      pad_mode: constant
+      center: 0.01705128140747547
+      scale: 0.54493242163523
+      min: -5
+      max: 5
+      pad_value: 0
+    track_eta:
+      length: 2800
+      pad_mode: constant
+      center: 0.03680419921875
+      scale: 0.5045733115703243
+      min: -5
+      max: 5
+      pad_value: 0
+    track_phi:
+      length: 2800
+      pad_mode: constant
+      center: 0.0038051605224609375
+      scale: 0.4618028427553076
+      min: -5
+      max: 5
+      pad_value: 0
+    track_charge:
+      length: 2800
+      pad_mode: constant
+      center: 1.0
+      scale: 0.5
+      min: -5
+      max: 5
+      pad_value: 0
+    track_dxy_significance:
+      length: 2800
+      pad_mode: constant
+      center: 0.005453384015709162
+      scale: 0.8551527686941688
+      min: -5
+      max: 5
+      pad_value: 0
+    track_px_raw:
+      length: 2800
+      pad_mode: constant
+      center: null
+      scale: 1
+      min: -5
+      max: 5
+      pad_value: 0
+    track_py_raw:
+      length: 2800
+      pad_mode: constant
+      center: null
+      scale: 1
+      min: -5
+      max: 5
+      pad_value: 0
+    track_pz_raw:
+      length: 2800
+      pad_mode: constant
+      center: null
+      scale: 1
+      min: -5
+      max: 5
+      pad_value: 0
+    track_energy:
+      length: 2800
+      pad_mode: constant
+      center: null
+      scale: 1
+      min: -5
+      max: 5
+      pad_value: 0
+    track_mask:
+      length: 2800
+      pad_mode: constant
+      center: null
+      scale: 1
+      min: -5
+      max: 5
+      pad_value: 0
+    track_label_from_tau:
+      length: 2800
+      pad_mode: constant
+      center: null
+      scale: 1
+      min: -5
+      max: 5
+      pad_value: 0
+new_variables:
+  track_mask: ak.ones_like(track_eta)
+  track_px: track_pt * np.cos(track_phi)
+  track_py: track_pt * np.sin(track_phi)
+  track_pz: track_pt * np.sinh(track_eta)
+  track_energy: np.sqrt(track_px**2 + track_py**2 + track_pz**2 + 0.13957**2)
+  track_eta_raw: track_eta
+  track_phi_raw: track_phi
+  track_px_raw: track_px
+  track_py_raw: track_py
+  track_pz_raw: track_pz
+  dummy_label: np.ones_like(event_n_tracks, dtype='float32')
+inputs:
+  pf_points:
+    length: 2800
+    pad_mode: constant
+    vars:
+    - - track_eta_raw
+      - null
+    - - track_phi_raw
+      - null
+  pf_features:
+    length: 2800
+    pad_mode: constant
+    vars:
+    - track_px
+    - track_py
+    - track_pz
+    - track_eta
+    - track_phi
+    - track_charge
+    - track_dxy_significance
+  pf_vectors:
+    length: 2800
+    pad_mode: constant
+    vars:
+    - - track_px_raw
+      - null
+    - - track_py_raw
+      - null
+    - - track_pz_raw
+      - null
+    - - track_energy
+      - null
+  pf_mask:
+    length: 2800
+    pad_mode: constant
+    vars:
+    - - track_mask
+      - null
+  pf_label:
+    length: 2800
+    pad_mode: constant
+    vars:
+    - - track_label_from_tau
+      - null
+labels:
+  type: simple
+  value:
+  - dummy_label
+observers:
+- event_n_tracks
+monitor_variables: []
+weights: null

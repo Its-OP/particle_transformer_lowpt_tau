@@ -92,6 +92,16 @@ def trim_to_max_valid_tracks(
     # Safety: ensure at least 1 track (handles empty-event edge case)
     max_valid_tracks = max(1, max_valid_tracks)
 
+    # Round up to the nearest multiple of 128 to reduce the number of
+    # distinct tensor shapes. torch.compile with dynamic=True recompiles
+    # for each new shape; bucketing avoids this by limiting to ~22 possible
+    # sizes (128, 256, ..., 2816) instead of thousands of unique values.
+    bucket_size = 128
+    max_valid_tracks = min(
+        ((max_valid_tracks + bucket_size - 1) // bucket_size) * bucket_size,
+        inputs[0].shape[2],  # don't exceed original padded length
+    )
+
     return [tensor[:, :, :max_valid_tracks] for tensor in inputs]
 
 

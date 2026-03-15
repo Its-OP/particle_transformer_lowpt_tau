@@ -226,48 +226,70 @@ def extract_label_from_inputs(
     return model_inputs, track_labels
 
 
+def extract_per_track_scores(output_dict: dict[str, torch.Tensor]) -> torch.Tensor:
+    """Extract per-track ranking scores from any head's inference output.
+
+    Supports both OC and DETR heads:
+        - OC: output_dict['beta_scores'] → (B, P) direct per-track scores
+        - DETR: output_dict['mask_logits'] → (B, Q, P) → max over queries → (B, P)
+
+    Args:
+        output_dict: Model inference output dict.
+
+    Returns:
+        per_track_scores: (B, P) scores for ranking tracks (higher = more likely tau).
+    """
+    if 'beta_scores' in output_dict:
+        return output_dict['beta_scores']
+    elif 'mask_logits' in output_dict:
+        # Per-track score = max mask logit across all queries
+        return output_dict['mask_logits'].max(dim=1).values
+    else:
+        raise KeyError(
+            f'Cannot extract per-track scores from output keys: '
+            f'{list(output_dict.keys())}. Expected "beta_scores" (OC) '
+            f'or "mask_logits" (DETR).',
+        )
+
+
 @torch.no_grad()
 def compute_recall_at_k_metrics(
-    beta_scores: torch.Tensor,
+    per_track_scores: torch.Tensor,
     track_labels: torch.Tensor,
     mask: torch.Tensor,
     k_values: tuple[int, ...] = (10, 20, 30),
 ) -> dict[str, float]:
-    """Compute recall@K and ranking quality metrics for object condensation.
+    """Compute recall@K metrics for track finding (head-agnostic).
 
-    Tracks are ranked by beta score (descending). For each K, recall@K is
+    Tracks are ranked by score (descending). For each K, recall@K is
     the fraction of GT pion tracks found in the top-K predictions.
 
+    Works with any head that produces per-track scores:
+        - OC: beta scores ∈ (0, 1)
+        - DETR: max mask logit across queries
+
     Args:
-        beta_scores: (B, P) per-track beta confidence scores ∈ (0, 1).
+        per_track_scores: (B, P) per-track ranking scores.
         track_labels: (B, 1, P) binary labels (1.0 = tau pion).
         mask: (B, 1, P) boolean mask (True = valid track).
         k_values: Tuple of K values for recall@K (default: 10, 20, 30).
 
     Returns:
-        Dict with recall@K for each K, plus signal/background beta stats.
+        Dict with recall_at_K for each K, plus total_gt_tracks.
     """
-    batch_size = beta_scores.shape[0]
+    batch_size = per_track_scores.shape[0]
     labels_flat = track_labels.squeeze(1) * mask.squeeze(1).float()  # (B, P)
 
-    # Mask out padded tracks (set beta to -1 so they rank last)
-    masked_beta = beta_scores.clone()
-    masked_beta[~mask.squeeze(1).bool()] = -1.0
+    # Mask out padded tracks (set score to -inf so they rank last)
+    masked_scores = per_track_scores.clone()
+    masked_scores[~mask.squeeze(1).bool()] = float('-inf')
 
-    # Sort tracks by beta descending
-    sorted_indices = masked_beta.argsort(dim=1, descending=True)  # (B, P)
+    # Sort tracks by score descending
+    sorted_indices = masked_scores.argsort(dim=1, descending=True)  # (B, P)
 
-    # Initialize recall accumulators
     recall_sums = {k: 0.0 for k in k_values}
     total_events_with_gt = 0
     total_gt_tracks = 0
-    found_at_max_k = 0
-
-    # Signal/background beta statistics
-    signal_beta_sum = 0.0
-    background_beta_sum = 0.0
-    total_signal_tracks = 0
-    total_background_tracks = 0
 
     for batch_index in range(batch_size):
         gt_positions = labels_flat[batch_index].nonzero(as_tuple=True)[0]
@@ -280,37 +302,16 @@ def compute_recall_at_k_metrics(
         total_events_with_gt += 1
         total_gt_tracks += num_gt
 
-        # Top-K track indices for each K
         event_sorted = sorted_indices[batch_index].tolist()
         for k in k_values:
             top_k_set = set(event_sorted[:k])
             found = len(top_k_set & gt_set)
             recall_sums[k] += found / num_gt
 
-        # Track max-K recall for overall found count
-        max_k = max(k_values)
-        top_max_k_set = set(event_sorted[:max_k])
-        found_at_max_k += len(top_max_k_set & gt_set)
-
-        # Signal vs background beta
-        event_beta = beta_scores[batch_index]
-        event_labels = labels_flat[batch_index]
-        signal_mask_event = event_labels.bool()
-        background_mask_event = (~signal_mask_event) & mask.squeeze(1)[batch_index].bool()
-
-        signal_beta_sum += event_beta[signal_mask_event].sum().item()
-        background_beta_sum += event_beta[background_mask_event].sum().item()
-        total_signal_tracks += signal_mask_event.sum().item()
-        total_background_tracks += background_mask_event.sum().item()
-
     metrics = {}
     for k in k_values:
         metrics[f'recall_at_{k}'] = recall_sums[k] / max(1, total_events_with_gt)
-
     metrics['total_gt_tracks'] = total_gt_tracks
-    metrics[f'found_gt_tracks_at_{max(k_values)}'] = found_at_max_k
-    metrics['mean_beta_signal'] = signal_beta_sum / max(1, total_signal_tracks)
-    metrics['mean_beta_background'] = background_beta_sum / max(1, total_background_tracks)
 
     return metrics
 
@@ -353,11 +354,9 @@ def train_one_epoch(
         Tuple of (loss_averages dict, updated global_batch_count).
     """
     model.train()
-    loss_accumulators = {
-        'total_loss': 0.0,
-        'focal_bce_loss': 0.0,
-        'potential_loss': 0.0,
-    }
+    # Loss accumulators are initialized dynamically from the first batch's
+    # loss_dict keys so the training loop works with any head (OC, DETR, etc.)
+    loss_accumulators: dict[str, float] | None = None
     num_batches = 0
     start_time = time.time()
 
@@ -423,7 +422,9 @@ def train_one_epoch(
 
         scheduler.step_batch()
 
-        # Accumulate losses
+        # Accumulate losses (initialize accumulators from first batch)
+        if loss_accumulators is None:
+            loss_accumulators = {key: 0.0 for key in loss_dict}
         for key in loss_accumulators:
             loss_accumulators[key] += loss_dict[key].item()
         num_batches += 1
@@ -434,16 +435,11 @@ def train_one_epoch(
             tensorboard_writer.add_scalar(
                 'Loss/train_batch', loss.item(), global_batch_count,
             )
-            tensorboard_writer.add_scalar(
-                'Loss/focal_bce_batch',
-                loss_dict['focal_bce_loss'].item(),
-                global_batch_count,
-            )
-            tensorboard_writer.add_scalar(
-                'Loss/potential_batch',
-                loss_dict['potential_loss'].item(),
-                global_batch_count,
-            )
+            for key, value in loss_dict.items():
+                if key != 'total_loss':
+                    tensorboard_writer.add_scalar(
+                        f'Loss/{key}_batch', value.item(), global_batch_count,
+                    )
             tensorboard_writer.add_scalar(
                 'LR/train', scheduler.get_last_lr()[0], global_batch_count,
             )
@@ -452,12 +448,17 @@ def train_one_epoch(
             elapsed = time.time() - start_time
             current_lr = scheduler.get_last_lr()[0]
             avg_total = loss_accumulators['total_loss'] / max(1, num_batches)
+            # Build component string dynamically from loss dict
+            component_parts = ' | '.join(
+                f'{key.replace("_loss", "")}: {value.item():.5f}'
+                for key, value in loss_dict.items()
+                if key != 'total_loss'
+            )
             logger.info(
                 f'Epoch {epoch} | Batch {batch_index} | '
                 f'Loss: {loss.item():.5f} | '
-                f'Avg Loss: {avg_total:.5f} | '
-                f'BCE: {loss_dict["focal_bce_loss"].item():.5f} | '
-                f'Pot: {loss_dict["potential_loss"].item():.5f} | '
+                f'Avg: {avg_total:.5f} | '
+                f'{component_parts} | '
                 f'LR: {current_lr:.2e} | '
                 f'Time: {elapsed:.1f}s',
             )
@@ -466,6 +467,8 @@ def train_one_epoch(
         del inputs, model_inputs, track_labels, loss_dict, loss
 
     # Average losses
+    if loss_accumulators is None:
+        loss_accumulators = {'total_loss': 0.0}
     loss_averages = {
         key: value / max(1, num_batches)
         for key, value in loss_accumulators.items()
@@ -497,21 +500,14 @@ def validate(
         Tuple of (loss_averages dict, metrics dict).
     """
     model.eval()
-    loss_accumulators = {
-        'total_loss': 0.0,
-        'focal_bce_loss': 0.0,
-        'potential_loss': 0.0,
+    # Dynamic loss accumulators — initialized from first batch
+    loss_accumulators: dict[str, float] | None = None
+    recall_accumulators = {
+        'recall_at_10': 0.0,
+        'recall_at_20': 0.0,
+        'recall_at_30': 0.0,
+        'total_gt_tracks': 0,
     }
-    # Aggregate recall@K metrics across batches
-    recall_k_values = (10, 20, 30)
-    recall_sums = {k: 0.0 for k in recall_k_values}
-    total_gt_tracks = 0
-    found_gt_at_max_k = 0
-    signal_beta_sum = 0.0
-    background_beta_sum = 0.0
-    total_signal = 0
-    total_background = 0
-    total_events_with_gt = 0
     num_batches = 0
 
     with torch.no_grad():
@@ -530,10 +526,12 @@ def validate(
             loss_dict = model(*model_inputs, track_labels=track_labels)
             model.eval()
 
+            if loss_accumulators is None:
+                loss_accumulators = {key: 0.0 for key in loss_dict}
             for key in loss_accumulators:
                 loss_accumulators[key] += loss_dict[key].item()
 
-            # Get beta scores for recall@K metrics
+            # Get per-track scores for recall@K (head-agnostic)
             output_dict = model(*model_inputs)
             mask_tensor = model_inputs[
                 # pf_mask is always at index 3 in model_inputs
@@ -541,31 +539,14 @@ def validate(
                 3
             ]
 
+            per_track_scores = extract_per_track_scores(output_dict)
             batch_metrics = compute_recall_at_k_metrics(
-                output_dict['beta_scores'],
-                track_labels,
-                mask_tensor,
-                k_values=recall_k_values,
+                per_track_scores, track_labels, mask_tensor,
             )
 
-            # Accumulate recall@K (weighted by number of events with GT)
-            for k in recall_k_values:
-                recall_sums[k] += (
-                    batch_metrics[f'recall_at_{k}']
-                    * batch_metrics.get('total_gt_tracks', 0)
-                    / max(1, batch_metrics.get('total_gt_tracks', 1))
-                    * (batch_metrics['total_gt_tracks'] > 0)
-                )
-            total_gt_tracks += batch_metrics['total_gt_tracks']
-            found_gt_at_max_k += batch_metrics.get(
-                f'found_gt_tracks_at_{max(recall_k_values)}', 0,
-            )
-            signal_beta_sum += (
-                batch_metrics['mean_beta_signal']
-                * batch_metrics['total_gt_tracks']
-            )
-            background_beta_sum += batch_metrics['mean_beta_background'] * 1
-            total_signal += batch_metrics['total_gt_tracks']
+            recall_accumulators['total_gt_tracks'] += batch_metrics['total_gt_tracks']
+            for key in ['recall_at_10', 'recall_at_20', 'recall_at_30']:
+                recall_accumulators[key] += batch_metrics[key]
 
             num_batches += 1
 
@@ -573,21 +554,18 @@ def validate(
             del output_dict, mask_tensor, batch_metrics
 
     # Average losses
+    if loss_accumulators is None:
+        loss_accumulators = {'total_loss': 0.0}
     loss_averages = {
         key: value / max(1, num_batches)
         for key, value in loss_accumulators.items()
     }
 
-    # Re-compute metrics across entire validation set
-    # For clean aggregation, re-run compute_recall_at_k_metrics
-    # on accumulated stats
     metrics = {
-        'recall_at_10': recall_sums[10] / max(1, num_batches),
-        'recall_at_20': recall_sums[20] / max(1, num_batches),
-        'recall_at_30': recall_sums[30] / max(1, num_batches),
-        'total_gt_tracks': total_gt_tracks,
-        'mean_beta_signal': signal_beta_sum / max(1, total_signal),
-        'mean_beta_background': background_beta_sum / max(1, num_batches),
+        'recall_at_10': recall_accumulators['recall_at_10'] / max(1, num_batches),
+        'recall_at_20': recall_accumulators['recall_at_20'] / max(1, num_batches),
+        'recall_at_30': recall_accumulators['recall_at_30'] / max(1, num_batches),
+        'total_gt_tracks': recall_accumulators['total_gt_tracks'],
     }
 
     return loss_averages, metrics
@@ -653,18 +631,35 @@ def main():
                              'infinite SimpleIterDataset)')
     parser.add_argument('--num-enrichment-layers', type=int, default=None,
                         help='Number of backbone enrichment layers')
-    parser.add_argument('--focal-bce-weight', type=float, default=1.0,
-                        help='Weight for focal BCE classification loss '
-                             '(default: 1.0)')
-    parser.add_argument('--potential-loss-weight', type=float, default=0.01,
-                        help='Weight for attractive + repulsive potential loss '
-                             '(default: 0.01)')
-    parser.add_argument('--beta-loss-weight', type=float, default=0.01,
-                        help='Weight for beta condensation+suppression loss '
-                             '(default: 0.01)')
-    parser.add_argument('--clustering-dim', type=int, default=8,
-                        help='Dimensionality of learned clustering space '
-                             '(default: 8)')
+    # ---- Head-specific args (only pass non-None to model) ----
+    # OC head args
+    parser.add_argument('--focal-bce-weight', type=float, default=None,
+                        help='[OC] Weight for focal BCE classification loss')
+    parser.add_argument('--potential-loss-weight', type=float, default=None,
+                        help='[OC] Weight for attractive + repulsive potential')
+    parser.add_argument('--beta-loss-weight', type=float, default=None,
+                        help='[OC] Weight for beta condensation+suppression')
+    parser.add_argument('--clustering-dim', type=int, default=None,
+                        help='[OC] Clustering space dimensionality')
+    # DETR head args
+    parser.add_argument('--num-encoder-layers', type=int, default=None,
+                        help='[DETR] Number of compact token encoder layers')
+    parser.add_argument('--num-decoder-layers', type=int, default=None,
+                        help='[DETR] Number of query decoder layers')
+    parser.add_argument('--num-queries', type=int, default=None,
+                        help='[DETR] Number of learnable object queries')
+    parser.add_argument('--mask-ce-loss-weight', type=float, default=None,
+                        help='[DETR] Weight for mask cross-entropy loss')
+    parser.add_argument('--confidence-loss-weight', type=float, default=None,
+                        help='[DETR] Weight for confidence loss')
+    parser.add_argument('--denoising-loss-weight', type=float, default=None,
+                        help='[DETR] Global scale for denoising losses')
+    parser.add_argument('--no-object-weight', type=float, default=None,
+                        help='[DETR] Weight for no-object class in confidence')
+    parser.add_argument('--num-denoising-groups', type=int, default=None,
+                        help='[DETR] Number of denoising groups (0 to disable)')
+    parser.add_argument('--denoising-noise-scale', type=float, default=None,
+                        help='[DETR] Noise scale for denoising queries')
     parser.add_argument('--save-every', type=int, default=10,
                         help='Save checkpoint every N epochs')
     parser.add_argument('--keep-best-k', type=int, default=5,
@@ -797,11 +792,22 @@ def main():
     if args.num_enrichment_layers is not None:
         model_kwargs['num_enrichment_layers'] = args.num_enrichment_layers
 
-    # Object condensation loss weights
-    model_kwargs['focal_bce_weight'] = args.focal_bce_weight
-    model_kwargs['potential_loss_weight'] = args.potential_loss_weight
-    model_kwargs['beta_loss_weight'] = args.beta_loss_weight
-    model_kwargs['clustering_dim'] = args.clustering_dim
+    # Head-specific model kwargs: only pass args that were explicitly set.
+    # Each network wrapper's get_model() pops the args it needs and ignores
+    # the rest, so passing only non-None values avoids unexpected kwargs.
+    _head_arg_names = [
+        # OC
+        'focal_bce_weight', 'potential_loss_weight', 'beta_loss_weight',
+        'clustering_dim',
+        # DETR
+        'num_encoder_layers', 'num_decoder_layers', 'num_queries',
+        'mask_ce_loss_weight', 'confidence_loss_weight', 'denoising_loss_weight',
+        'no_object_weight', 'num_denoising_groups', 'denoising_noise_scale',
+    ]
+    for arg_name in _head_arg_names:
+        value = getattr(args, arg_name, None)
+        if value is not None:
+            model_kwargs[arg_name] = value
 
     model, model_info = network_module.get_model(data_config, **model_kwargs)
     model = model.to(device)
@@ -816,11 +822,7 @@ def main():
         f'Frozen: {total_params - trainable_params:,}',
     )
     logger.info(f'Input names: {data_config.input_names}')
-    logger.info(
-        f'Loss weights: focal_bce={args.focal_bce_weight}, '
-        f'potential={args.potential_loss_weight}, '
-        f'beta={args.beta_loss_weight}',
-    )
+    logger.info(f'Head-specific kwargs: {model_kwargs}')
 
     # Find input indices for pf_mask and pf_label
     input_names = list(data_config.input_names)
@@ -915,9 +917,11 @@ def main():
     best_val_loss = float('inf')
     best_val_epoch = 0
     global_batch_count = 0
+    # Loss history keys are built dynamically from the model's loss_dict.
+    # 'train', 'val', 'lr', 'recall_at_*' are always present.
+    # Head-specific loss component keys are added on the first epoch.
     loss_history = {
         'train': [], 'val': [], 'lr': [],
-        'focal_bce': [], 'potential': [],
         'recall_at_10': [], 'recall_at_20': [], 'recall_at_30': [],
     }
 
@@ -954,11 +958,15 @@ def main():
             label_input_index=label_input_index,
             grad_clip_max_norm=args.grad_clip,
         )
+        train_components = ' | '.join(
+            f'{key.replace("_loss", "")}: {value:.5f}'
+            for key, value in train_losses.items()
+            if key != 'total_loss'
+        )
         logger.info(
             f'Epoch {epoch} train | '
             f'total: {train_losses["total_loss"]:.5f} | '
-            f'bce: {train_losses["focal_bce_loss"]:.5f} | '
-            f'pot: {train_losses["potential_loss"]:.5f}',
+            f'{train_components}',
         )
 
         # Free training memory before validation to reduce peak usage.
@@ -1024,12 +1032,11 @@ def main():
         tensorboard_writer.add_scalar(
             'Loss/val_epoch', val_loss, epoch,
         )
-        tensorboard_writer.add_scalar(
-            'Loss/val_focal_bce', val_losses['focal_bce_loss'], epoch,
-        )
-        tensorboard_writer.add_scalar(
-            'Loss/val_potential', val_losses['potential_loss'], epoch,
-        )
+        for key, value in val_losses.items():
+            if key != 'total_loss':
+                tensorboard_writer.add_scalar(
+                    f'Loss/val_{key}', value, epoch,
+                )
         tensorboard_writer.add_scalar(
             'Metrics/recall_at_10', val_metrics['recall_at_10'], epoch,
         )
@@ -1045,8 +1052,14 @@ def main():
         loss_history['train'].append(train_losses['total_loss'])
         loss_history['val'].append(val_loss)
         loss_history['lr'].append(current_lr)
-        loss_history['focal_bce'].append(val_losses['focal_bce_loss'])
-        loss_history['potential'].append(val_losses['potential_loss'])
+        # Append head-specific loss components dynamically
+        for key, value in val_losses.items():
+            if key == 'total_loss':
+                continue
+            short_key = key.replace('_loss', '')
+            if short_key not in loss_history:
+                loss_history[short_key] = []
+            loss_history[short_key].append(value)
         loss_history['recall_at_10'].append(val_metrics['recall_at_10'])
         loss_history['recall_at_20'].append(val_metrics['recall_at_20'])
         loss_history['recall_at_30'].append(val_metrics['recall_at_30'])
@@ -1151,11 +1164,15 @@ def main():
                 label_input_index=label_input_index,
                 grad_clip_max_norm=args.grad_clip,
             )
+            finetune_components = ' | '.join(
+                f'{key.replace("_loss", "")}: {value:.5f}'
+                for key, value in train_losses.items()
+                if key != 'total_loss'
+            )
             logger.info(
                 f'Epoch {epoch} train | '
                 f'total: {train_losses["total_loss"]:.5f} | '
-                f'pot: {train_losses["potential_loss"]:.5f} | '
-                f'beta: {train_losses["beta_loss"]:.5f}',
+                f'{finetune_components}',
             )
 
             # Free training memory before validation
@@ -1215,8 +1232,13 @@ def main():
             loss_history['train'].append(train_losses['total_loss'])
             loss_history['val'].append(val_loss)
             loss_history['lr'].append(current_lr)
-            loss_history['potential'].append(val_losses['potential_loss'])
-            loss_history['beta'].append(val_losses['beta_loss'])
+            for key, value in val_losses.items():
+                if key == 'total_loss':
+                    continue
+                short_key = key.replace('_loss', '')
+                if short_key not in loss_history:
+                    loss_history[short_key] = []
+                loss_history[short_key].append(value)
             loss_history['recall_at_10'].append(val_metrics['recall_at_10'])
             loss_history['recall_at_20'].append(val_metrics['recall_at_20'])
             loss_history['recall_at_30'].append(val_metrics['recall_at_30'])

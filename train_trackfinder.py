@@ -657,15 +657,6 @@ def main():
                              'loss. Distributes probability mass uniformly to '
                              'prevent overconfident logit growth (default in '
                              'model: 0.1)')
-    parser.add_argument('--one-to-many-k', type=int, default=None,
-                        help='[DETR] Number of queries per GT in auxiliary '
-                             'one-to-many matching. K× amplifies positive '
-                             'gradient signal. Set to 0 to disable '
-                             '(default in model: 0)')
-    parser.add_argument('--one-to-many-weight', type=float, default=None,
-                        help='[DETR] Weight for auxiliary one-to-many loss. '
-                             'Scales combined OTM mask CE + confidence BCE '
-                             '(default in model: 0.5)')
     parser.add_argument('--save-every', type=int, default=10,
                         help='Save checkpoint every N epochs')
     parser.add_argument('--keep-best-k', type=int, default=5,
@@ -818,7 +809,6 @@ def main():
         'mask_ce_loss_weight', 'confidence_loss_weight', 'denoising_loss_weight',
         'no_object_weight', 'num_denoising_groups', 'denoising_noise_scale',
         'label_smoothing',
-        'one_to_many_k', 'one_to_many_weight',
     ]
     for arg_name in _head_arg_names:
         value = getattr(args, arg_name, None)

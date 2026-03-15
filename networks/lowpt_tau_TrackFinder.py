@@ -33,11 +33,6 @@ def get_model(data_config, **kwargs):
         num_denoising_groups: DN-DETR denoising groups (default: 5).
         denoising_noise_scale: Gaussian noise scale for denoising (default: 0.5).
         label_smoothing: Label smoothing for cross-entropy mask loss (default: 0.1).
-        one_to_many_k: Number of queries per GT in auxiliary one-to-many
-            matching (default: 0, disabled). When > 0, each GT track is
-            matched to the top-K queries by cost, providing K× more positive
-            gradient signal.
-        one_to_many_weight: Weight for auxiliary one-to-many loss (default: 0.5).
     """
     pretrained_backbone_path = kwargs.pop('pretrained_backbone_path', None)
     backbone_frozen = kwargs.pop('backbone_frozen', True)
@@ -59,10 +54,6 @@ def get_model(data_config, **kwargs):
 
     # Label smoothing for cross-entropy mask loss
     label_smoothing = kwargs.pop('label_smoothing', 0.1)
-
-    # One-to-many auxiliary matching (Group DETR)
-    one_to_many_k = kwargs.pop('one_to_many_k', 0)
-    one_to_many_weight = kwargs.pop('one_to_many_weight', 0.5)
 
     input_dim = len(data_config.input_dicts['pf_features'])
 
@@ -110,8 +101,6 @@ def get_model(data_config, **kwargs):
         num_denoising_groups=num_denoising_groups,
         denoising_noise_scale=denoising_noise_scale,
         label_smoothing=label_smoothing,
-        one_to_many_k=one_to_many_k,
-        one_to_many_weight=one_to_many_weight,
     )
     configuration.update(**kwargs)
     _logger.info('Model config: %s' % str(configuration))

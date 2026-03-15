@@ -355,8 +355,8 @@ def train_one_epoch(
     model.train()
     loss_accumulators = {
         'total_loss': 0.0,
+        'focal_bce_loss': 0.0,
         'potential_loss': 0.0,
-        'beta_loss': 0.0,
     }
     num_batches = 0
     start_time = time.time()
@@ -435,13 +435,13 @@ def train_one_epoch(
                 'Loss/train_batch', loss.item(), global_batch_count,
             )
             tensorboard_writer.add_scalar(
-                'Loss/potential_batch',
-                loss_dict['potential_loss'].item(),
+                'Loss/focal_bce_batch',
+                loss_dict['focal_bce_loss'].item(),
                 global_batch_count,
             )
             tensorboard_writer.add_scalar(
-                'Loss/beta_batch',
-                loss_dict['beta_loss'].item(),
+                'Loss/potential_batch',
+                loss_dict['potential_loss'].item(),
                 global_batch_count,
             )
             tensorboard_writer.add_scalar(
@@ -456,8 +456,8 @@ def train_one_epoch(
                 f'Epoch {epoch} | Batch {batch_index} | '
                 f'Loss: {loss.item():.5f} | '
                 f'Avg Loss: {avg_total:.5f} | '
+                f'BCE: {loss_dict["focal_bce_loss"].item():.5f} | '
                 f'Pot: {loss_dict["potential_loss"].item():.5f} | '
-                f'Beta: {loss_dict["beta_loss"].item():.5f} | '
                 f'LR: {current_lr:.2e} | '
                 f'Time: {elapsed:.1f}s',
             )
@@ -499,8 +499,8 @@ def validate(
     model.eval()
     loss_accumulators = {
         'total_loss': 0.0,
+        'focal_bce_loss': 0.0,
         'potential_loss': 0.0,
-        'beta_loss': 0.0,
     }
     # Aggregate recall@K metrics across batches
     recall_k_values = (10, 20, 30)
@@ -644,16 +644,24 @@ def main():
                         help='Enable mixed precision training')
     parser.add_argument('--no-compile', action='store_true',
                         help='Disable torch.compile')
+    parser.add_argument('--no-in-memory', action='store_true',
+                        help='Stream data from disk instead of loading '
+                             'entire dataset into memory. Slower but uses '
+                             'much less RAM — use for local smoke tests.')
     parser.add_argument('--steps-per-epoch', type=int, default=None,
                         help='Training batches per epoch (required for '
                              'infinite SimpleIterDataset)')
     parser.add_argument('--num-enrichment-layers', type=int, default=None,
                         help='Number of backbone enrichment layers')
-    parser.add_argument('--potential-loss-weight', type=float, default=1.0,
-                        help='Weight for attractive + repulsive potential loss '
+    parser.add_argument('--focal-bce-weight', type=float, default=1.0,
+                        help='Weight for focal BCE classification loss '
                              '(default: 1.0)')
-    parser.add_argument('--beta-loss-weight', type=float, default=1.0,
-                        help='Weight for beta loss (default: 1.0)')
+    parser.add_argument('--potential-loss-weight', type=float, default=0.01,
+                        help='Weight for attractive + repulsive potential loss '
+                             '(default: 0.01)')
+    parser.add_argument('--beta-loss-weight', type=float, default=0.01,
+                        help='Weight for beta condensation+suppression loss '
+                             '(default: 0.01)')
     parser.add_argument('--clustering-dim', type=int, default=8,
                         help='Dimensionality of learned clustering space '
                              '(default: 8)')
@@ -718,6 +726,10 @@ def main():
             f'{train_num_workers} (only {num_parquet_files} parquet files)',
         )
 
+    load_in_memory = not args.no_in_memory
+    if args.no_in_memory:
+        logger.info('Streaming data from disk (--no-in-memory)')
+
     train_dataset = SimpleIterDataset(
         file_dict,
         data_config_file=args.data_config,
@@ -725,7 +737,7 @@ def main():
         load_range_and_fraction=((0.0, args.train_fraction), 1.0),
         fetch_by_files=True,
         fetch_step=num_parquet_files,
-        in_memory=True,
+        in_memory=load_in_memory,
     )
     data_config = train_dataset.config
 
@@ -736,7 +748,7 @@ def main():
         load_range_and_fraction=((args.train_fraction, 1.0), 1.0),
         fetch_by_files=True,
         fetch_step=num_parquet_files,
-        in_memory=True,
+        in_memory=load_in_memory,
     )
 
     train_loader = DataLoader(
@@ -753,7 +765,7 @@ def main():
     # a smaller final batch that can cause uneven GPU memory usage.
     val_num_workers = min(
         max(1, train_num_workers // 2), num_parquet_files,
-    )
+    ) if train_num_workers > 0 else 0
     val_loader = DataLoader(
         val_dataset,
         batch_size=args.batch_size,
@@ -786,6 +798,7 @@ def main():
         model_kwargs['num_enrichment_layers'] = args.num_enrichment_layers
 
     # Object condensation loss weights
+    model_kwargs['focal_bce_weight'] = args.focal_bce_weight
     model_kwargs['potential_loss_weight'] = args.potential_loss_weight
     model_kwargs['beta_loss_weight'] = args.beta_loss_weight
     model_kwargs['clustering_dim'] = args.clustering_dim
@@ -804,7 +817,8 @@ def main():
     )
     logger.info(f'Input names: {data_config.input_names}')
     logger.info(
-        f'Loss weights: potential={args.potential_loss_weight}, '
+        f'Loss weights: focal_bce={args.focal_bce_weight}, '
+        f'potential={args.potential_loss_weight}, '
         f'beta={args.beta_loss_weight}',
     )
 
@@ -897,7 +911,7 @@ def main():
     global_batch_count = 0
     loss_history = {
         'train': [], 'val': [], 'lr': [],
-        'potential': [], 'beta': [],
+        'focal_bce': [], 'potential': [],
         'recall_at_10': [], 'recall_at_20': [], 'recall_at_30': [],
     }
 
@@ -937,8 +951,8 @@ def main():
         logger.info(
             f'Epoch {epoch} train | '
             f'total: {train_losses["total_loss"]:.5f} | '
-            f'pot: {train_losses["potential_loss"]:.5f} | '
-            f'beta: {train_losses["beta_loss"]:.5f}',
+            f'bce: {train_losses["focal_bce_loss"]:.5f} | '
+            f'pot: {train_losses["potential_loss"]:.5f}',
         )
 
         # Free training memory before validation to reduce peak usage.
@@ -1005,10 +1019,10 @@ def main():
             'Loss/val_epoch', val_loss, epoch,
         )
         tensorboard_writer.add_scalar(
-            'Loss/val_potential', val_losses['potential_loss'], epoch,
+            'Loss/val_focal_bce', val_losses['focal_bce_loss'], epoch,
         )
         tensorboard_writer.add_scalar(
-            'Loss/val_beta', val_losses['beta_loss'], epoch,
+            'Loss/val_potential', val_losses['potential_loss'], epoch,
         )
         tensorboard_writer.add_scalar(
             'Metrics/recall_at_10', val_metrics['recall_at_10'], epoch,
@@ -1025,8 +1039,8 @@ def main():
         loss_history['train'].append(train_losses['total_loss'])
         loss_history['val'].append(val_loss)
         loss_history['lr'].append(current_lr)
+        loss_history['focal_bce'].append(val_losses['focal_bce_loss'])
         loss_history['potential'].append(val_losses['potential_loss'])
-        loss_history['beta'].append(val_losses['beta_loss'])
         loss_history['recall_at_10'].append(val_metrics['recall_at_10'])
         loss_history['recall_at_20'].append(val_metrics['recall_at_20'])
         loss_history['recall_at_30'].append(val_metrics['recall_at_30'])

@@ -32,10 +32,11 @@ def get_model(data_config, **kwargs):
     num_enrichment_layers = kwargs.pop('num_enrichment_layers', 5)
 
     # OC-specific hyperparameters
-    potential_loss_weight = kwargs.pop('potential_loss_weight', 1.0)
-    beta_loss_weight = kwargs.pop('beta_loss_weight', 1.0)
+    focal_bce_weight = kwargs.pop('focal_bce_weight', 1.0)
+    potential_loss_weight = kwargs.pop('potential_loss_weight', 0.01)
+    beta_loss_weight = kwargs.pop('beta_loss_weight', 0.01)
     q_min = kwargs.pop('q_min', 0.1)
-    suppression_weight = kwargs.pop('suppression_weight', 1.0)
+    suppression_weight = kwargs.pop('suppression_weight', 0.01)
     clustering_dim = kwargs.pop('clustering_dim', 8)
 
     input_dim = len(data_config.input_dicts['pf_features'])
@@ -69,6 +70,7 @@ def get_model(data_config, **kwargs):
     configuration = dict(
         backbone_kwargs=backbone_kwargs,
         head_kwargs=head_kwargs,
+        focal_bce_weight=focal_bce_weight,
         potential_loss_weight=potential_loss_weight,
         beta_loss_weight=beta_loss_weight,
         q_min=q_min,

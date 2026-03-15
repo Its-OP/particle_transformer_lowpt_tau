@@ -52,8 +52,9 @@ STEPS_PER_EPOCH=500
 NUM_WORKERS=4
 NO_COMPILE=false
 # Object condensation loss weights
-POTENTIAL_LOSS_WEIGHT=1.0
-BETA_LOSS_WEIGHT=1.0
+FOCAL_BCE_WEIGHT=1.0
+POTENTIAL_LOSS_WEIGHT=0.01
+BETA_LOSS_WEIGHT=0.01
 # Keep top K best checkpoints by val loss (0 = keep all, for CERN cluster runs)
 KEEP_BEST_K=5
 
@@ -100,6 +101,7 @@ TRAIN_CMD="${CONDA_INIT} && cd ${SCRIPT_DIR} && python train_trackfinder.py \
     --scheduler ${SCHEDULER} \
     --device ${DEVICE} \
     --num-workers ${NUM_WORKERS} \
+    --focal-bce-weight ${FOCAL_BCE_WEIGHT} \
     --potential-loss-weight ${POTENTIAL_LOSS_WEIGHT} \
     --beta-loss-weight ${BETA_LOSS_WEIGHT} \
     --keep-best-k ${KEEP_BEST_K} \
@@ -152,7 +154,7 @@ echo "Batch size: ${BATCH_SIZE}"
 echo "LR:         ${LEARNING_RATE}"
 echo "Scheduler:  ${SCHEDULER}"
 echo "Device:     ${DEVICE}"
-echo "Loss wts:   potential=${POTENTIAL_LOSS_WEIGHT}, beta=${BETA_LOSS_WEIGHT}"
+echo "Loss wts:   bce=${FOCAL_BCE_WEIGHT}, pot=${POTENTIAL_LOSS_WEIGHT}, beta=${BETA_LOSS_WEIGHT}"
 echo "AMP:        enabled"
 if [ "$NO_COMPILE" = true ]; then
     echo "Compile:    disabled"

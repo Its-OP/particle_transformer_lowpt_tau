@@ -1,13 +1,14 @@
-"""Network wrapper for tau-origin pion track finding.
+"""Network wrapper for mask-based DETR tau-origin pion track finding.
 
 Used by the custom train_trackfinder.py script (not weaver's training loop).
-Provides get_model() to construct the TauTrackFinder with pretrained
-EnrichCompactBackbone and DETR-style encoder-decoder head.
+Provides get_model() to construct the TauTrackFinder with pretrained backbone
+and mask-based DETR head with DN-DETR denoising and auxiliary losses.
 
 The backbone is frozen by default — only the head parameters are trained.
 Pretrained backbone weights are loaded from a checkpoint file via
 --pretrained-backbone CLI argument.
 """
+
 import torch
 from weaver.nn.model.TauTrackFinder import TauTrackFinder
 from weaver.utils.logger import _logger
@@ -21,27 +22,31 @@ def get_model(data_config, **kwargs):
         backbone_frozen: Whether to freeze backbone (default: True).
         num_enrichment_layers: Number of enrichment layers (default: 5).
         num_encoder_layers: Number of compact token encoder layers (default: 6).
-        num_decoder_layers: Number of query decoder layers (default: 6).
-        pointer_loss_weight: Weight for pointer focal loss (default: 2.0).
-        confidence_loss_weight: Weight for confidence BCE loss (default: 5.0).
-        eos_coef: DETR-style no-object coefficient for confidence BCE (default: 0.1).
-            Downweights empty (∅) targets to prevent trivial "always empty" solution.
+        num_decoder_layers: Number of query decoder layers (default: 4).
+        num_queries: Number of learned queries (default: 30).
+        dice_loss_weight: Weight for dice loss (default: 2.0).
+        focal_bce_loss_weight: Weight for focal BCE loss (default: 5.0).
+        confidence_loss_weight: Weight for confidence BCE loss (default: 2.0).
+        no_object_weight: Weight for empty targets in confidence BCE (default: 0.4).
+        num_denoising_groups: DN-DETR denoising groups (default: 5).
+        denoising_noise_scale: Gaussian noise scale for denoising (default: 0.5).
     """
     pretrained_backbone_path = kwargs.pop('pretrained_backbone_path', None)
     backbone_frozen = kwargs.pop('backbone_frozen', True)
     num_enrichment_layers = kwargs.pop('num_enrichment_layers', 5)
     num_encoder_layers = kwargs.pop('num_encoder_layers', 6)
-    num_decoder_layers = kwargs.pop('num_decoder_layers', 6)
+    num_decoder_layers = kwargs.pop('num_decoder_layers', 4)
+    num_queries = kwargs.pop('num_queries', 30)
 
-    # Loss weights: rebalanced from ptr=5.0/conf=1.0 to ptr=2.0/conf=5.0
-    # so confidence loss receives meaningful gradient signal
-    pointer_loss_weight = kwargs.pop('pointer_loss_weight', 2.0)
-    confidence_loss_weight = kwargs.pop('confidence_loss_weight', 5.0)
+    # Loss weights
+    dice_loss_weight = kwargs.pop('dice_loss_weight', 2.0)
+    focal_bce_loss_weight = kwargs.pop('focal_bce_loss_weight', 5.0)
+    confidence_loss_weight = kwargs.pop('confidence_loss_weight', 2.0)
+    no_object_weight = kwargs.pop('no_object_weight', 0.4)
 
-    # DETR-style no-object coefficient (Carion et al., ECCV 2020):
-    # Downweights empty (∅) targets in confidence BCE to prevent the model
-    # from trivially minimizing loss by always predicting "no object".
-    eos_coef = kwargs.pop('eos_coef', 0.1)
+    # DN-DETR denoising
+    num_denoising_groups = kwargs.pop('num_denoising_groups', 5)
+    denoising_noise_scale = kwargs.pop('denoising_noise_scale', 0.5)
 
     input_dim = len(data_config.input_dicts['pf_features'])
 
@@ -68,10 +73,10 @@ def get_model(data_config, **kwargs):
     )
 
     decoder_kwargs = dict(
-        num_queries=15,
+        num_queries=num_queries,
         max_gt_tracks=6,
         decoder_dim=256,
-        pointer_dim=128,
+        mask_dim=128,
         num_heads=8,
         num_encoder_layers=num_encoder_layers,
         num_decoder_layers=num_decoder_layers,
@@ -81,9 +86,12 @@ def get_model(data_config, **kwargs):
     configuration = dict(
         backbone_kwargs=backbone_kwargs,
         decoder_kwargs=decoder_kwargs,
-        pointer_loss_weight=pointer_loss_weight,
+        dice_loss_weight=dice_loss_weight,
+        focal_bce_loss_weight=focal_bce_loss_weight,
         confidence_loss_weight=confidence_loss_weight,
-        no_object_weight=eos_coef,
+        no_object_weight=no_object_weight,
+        num_denoising_groups=num_denoising_groups,
+        denoising_noise_scale=denoising_noise_scale,
     )
     configuration.update(**kwargs)
     _logger.info('Model config: %s' % str(configuration))
@@ -100,11 +108,10 @@ def get_model(data_config, **kwargs):
         )
 
         # The checkpoint may be either:
-        # 1. MaskedTrackPretrainer state_dict (backbone weights prefixed with 'backbone.')
-        # 2. Standalone backbone state_dict (saved by pretrain_backbone.py as backbone_best.pt)
+        # 1. MaskedTrackPretrainer state_dict (prefixed with 'backbone.')
+        # 2. Standalone backbone state_dict (backbone_best.pt)
         state_dict = checkpoint.get('model_state_dict', checkpoint)
 
-        # Check if weights are from MaskedTrackPretrainer (prefixed with 'backbone.')
         has_backbone_prefix = any(
             key.startswith('backbone.') for key in state_dict
         )
@@ -123,12 +130,12 @@ def get_model(data_config, **kwargs):
 
     # Freeze/unfreeze backbone
     if backbone_frozen:
-        for param in model.backbone.parameters():
-            param.requires_grad = False
+        for parameter in model.backbone.parameters():
+            parameter.requires_grad = False
         _logger.info('Backbone frozen (no gradients).')
     else:
-        for param in model.backbone.parameters():
-            param.requires_grad = True
+        for parameter in model.backbone.parameters():
+            parameter.requires_grad = True
         _logger.info('Backbone unfrozen (end-to-end training).')
 
     model_info = {

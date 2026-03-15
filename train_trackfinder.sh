@@ -36,7 +36,7 @@ CONDA_ENV_NAME="part"
 DATA_CONFIG="data/low-pt/lowpt_tau_trackfinder.yaml"
 DATA_DIR="data/low-pt/"
 NETWORK="networks/lowpt_tau_TrackFinder.py"
-MODEL_NAME="TrackFinder"
+MODEL_NAME="TrackFinderV2"
 EXPERIMENTS_DIR="experiments"
 PRETRAINED_BACKBONE="models/backbone_best.pt"
 EPOCHS=50
@@ -51,13 +51,14 @@ DEVICE="cuda:0"
 STEPS_PER_EPOCH=500
 NUM_WORKERS=4
 NO_COMPILE=false
-# Loss weights: rebalanced from ptr=5.0/conf=1.0 to ptr=2.0/conf=5.0
-# so confidence loss receives meaningful gradient signal
-POINTER_LOSS_WEIGHT=2.0
-CONFIDENCE_LOSS_WEIGHT=5.0
-# DETR-style no-object coefficient (eos_coef):
-# Downweights empty (∅) targets in confidence BCE to prevent trivial solutions
-EOS_COEF=0.1
+# Mask DETR loss weights
+DICE_LOSS_WEIGHT=2.0
+FOCAL_BCE_LOSS_WEIGHT=5.0
+CONFIDENCE_LOSS_WEIGHT=2.0
+NO_OBJECT_WEIGHT=0.4
+# DN-DETR denoising
+NUM_DENOISING_GROUPS=5
+DENOISING_NOISE_SCALE=0.5
 # Keep top K best checkpoints by val loss (0 = keep all, for CERN cluster runs)
 KEEP_BEST_K=5
 
@@ -104,9 +105,12 @@ TRAIN_CMD="${CONDA_INIT} && cd ${SCRIPT_DIR} && python train_trackfinder.py \
     --scheduler ${SCHEDULER} \
     --device ${DEVICE} \
     --num-workers ${NUM_WORKERS} \
-    --pointer-loss-weight ${POINTER_LOSS_WEIGHT} \
+    --dice-loss-weight ${DICE_LOSS_WEIGHT} \
+    --focal-bce-loss-weight ${FOCAL_BCE_LOSS_WEIGHT} \
     --confidence-loss-weight ${CONFIDENCE_LOSS_WEIGHT} \
-    --eos-coef ${EOS_COEF} \
+    --no-object-weight ${NO_OBJECT_WEIGHT} \
+    --num-denoising-groups ${NUM_DENOISING_GROUPS} \
+    --denoising-noise-scale ${DENOISING_NOISE_SCALE} \
     --keep-best-k ${KEEP_BEST_K} \
     --amp"
 
@@ -157,7 +161,8 @@ echo "Batch size: ${BATCH_SIZE}"
 echo "LR:         ${LEARNING_RATE}"
 echo "Scheduler:  ${SCHEDULER}"
 echo "Device:     ${DEVICE}"
-echo "Loss wts:   ptr=${POINTER_LOSS_WEIGHT}, conf=${CONFIDENCE_LOSS_WEIGHT}, eos=${EOS_COEF}"
+echo "Loss wts:   dice=${DICE_LOSS_WEIGHT}, bce=${FOCAL_BCE_LOSS_WEIGHT}, conf=${CONFIDENCE_LOSS_WEIGHT}, eos=${NO_OBJECT_WEIGHT}"
+echo "Denoising:  groups=${NUM_DENOISING_GROUPS}, noise=${DENOISING_NOISE_SCALE}"
 echo "AMP:        enabled"
 if [ "$NO_COMPILE" = true ]; then
     echo "Compile:    disabled"

@@ -628,35 +628,16 @@ def main():
     parser.add_argument('--clustering-dim', type=int, default=None,
                         help='[OC] Clustering space dimensionality')
     # DETR head
-    parser.add_argument('--num-encoder-layers', type=int, default=None,
-                        help='[DETR] Number of compact token encoder layers')
     parser.add_argument('--num-decoder-layers', type=int, default=None,
-                        help='[DETR] Number of query decoder layers')
+                        help='[DETR] Number of decoder layers')
     parser.add_argument('--num-queries', type=int, default=None,
                         help='[DETR] Number of learnable object queries')
     parser.add_argument('--mask-ce-loss-weight', type=float, default=None,
                         help='[DETR] Weight for mask cross-entropy loss')
     parser.add_argument('--confidence-loss-weight', type=float, default=None,
                         help='[DETR] Weight for confidence loss')
-    parser.add_argument('--denoising-loss-weight', type=float, default=None,
-                        help='[DETR] Global scale for denoising losses')
     parser.add_argument('--no-object-weight', type=float, default=None,
                         help='[DETR] Weight for no-object class in confidence')
-    parser.add_argument('--num-denoising-groups', type=int, default=None,
-                        help='[DETR] Number of denoising groups (0 to disable)')
-    parser.add_argument('--denoising-noise-scale', type=float, default=None,
-                        help='[DETR] Noise scale for denoising queries')
-    parser.add_argument('--drop-path-rate', type=float, default=None,
-                        help='[DETR] Stochastic depth drop rate for decoder '
-                             'layers. Linearly increases from 0 (first layer) '
-                             'to this value (last layer). Regularizes deep '
-                             'decoders to prevent overfitting (default: 0.0, '
-                             'disabled)')
-    parser.add_argument('--label-smoothing', type=float, default=None,
-                        help='[DETR] Label smoothing for cross-entropy mask '
-                             'loss. Distributes probability mass uniformly to '
-                             'prevent overconfident logit growth (default in '
-                             'model: 0.1)')
     parser.add_argument('--save-every', type=int, default=10,
                         help='Save checkpoint every N epochs')
     parser.add_argument('--keep-best-k', type=int, default=5,
@@ -788,7 +769,7 @@ def main():
         logger.info('Head: Object Condensation (--oc)')
     else:
         network_path = args.network
-        logger.info(f'Head: DETR mask-denoising ({args.network})')
+        logger.info(f'Head: DETR ({args.network})')
     network_module = load_network_module(network_path)
 
     model_kwargs = {}
@@ -804,11 +785,9 @@ def main():
         'focal_bce_weight', 'potential_loss_weight', 'beta_loss_weight',
         'clustering_dim',
         # DETR
-        'num_encoder_layers', 'num_decoder_layers', 'num_queries',
-        'drop_path_rate',
-        'mask_ce_loss_weight', 'confidence_loss_weight', 'denoising_loss_weight',
-        'no_object_weight', 'num_denoising_groups', 'denoising_noise_scale',
-        'label_smoothing',
+        'num_decoder_layers', 'num_queries',
+        'mask_ce_loss_weight', 'confidence_loss_weight',
+        'no_object_weight',
     ]
     for arg_name in _head_arg_names:
         value = getattr(args, arg_name, None)

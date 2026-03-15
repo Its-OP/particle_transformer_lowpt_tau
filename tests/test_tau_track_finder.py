@@ -60,7 +60,6 @@ def _make_decoder_kwargs():
         decoder_dim=64,  # Smaller for speed
         mask_dim=32,
         num_heads=4,
-        num_encoder_layers=1,  # Minimal for speed
         num_decoder_layers=1,
         dropout=0.0,
     )
@@ -185,7 +184,7 @@ class TestLossComponents:
 
         assert 'mask_ce_loss' in loss_dict
         assert 'confidence_loss' in loss_dict
-        assert 'denoising_loss' in loss_dict
+        # No denoising in simplified model
         assert 'total_loss' in loss_dict
 
     def test_loss_components_are_finite(self, model, sample_training_inputs):
@@ -204,7 +203,6 @@ class TestLossComponents:
         expected_total = (
             model.mask_ce_loss_weight * loss_dict['mask_ce_loss']
             + model.confidence_loss_weight * loss_dict['confidence_loss']
-            + loss_dict['denoising_loss']
         )
         torch.testing.assert_close(
             loss_dict['total_loss'], expected_total, rtol=1e-4, atol=1e-6,
@@ -352,24 +350,16 @@ class TestArchitecture:
         caused query norms to grow from ~1 to ~598 across 6 layers, making
         decoded queries input-independent (cosine sim = 1.0000 across events).
         """
-        # DualCrossAttentionDecoderLayer uses explicit post-norm
-        # (LayerNorm after residual addition). Verify decoder layers exist.
+        # DecoderLayer uses explicit post-norm (LayerNorm after residual).
         decoder_layer = model.head.decoder_layers[0]
-        assert hasattr(decoder_layer, 'norm1'), (
+        assert hasattr(decoder_layer, 'norm_self_attention'), (
             "Decoder layer should have LayerNorm modules for post-norm"
         )
 
-    def test_encoder_uses_post_norm(self, model):
-        """Encoder should use post-norm (norm_first=False) to preserve
-        event-specific variation in compact tokens.
-
-        Pre-norm caused cross-event cosine similarity ~0.97 in encoded
-        compact tokens — only ~3% of the representation was event-specific.
-        Original DETR uses post-norm for both encoder and decoder.
-        """
-        encoder_layer = model.head.transformer_encoder.layers[0]
-        assert encoder_layer.norm_first is False, (
-            "Encoder should use post-norm (norm_first=False)"
+    def test_no_encoder(self, model):
+        """Simplified model has no compact token encoder."""
+        assert not hasattr(model.head, 'transformer_encoder'), (
+            "Simplified head should not have a compact token encoder"
         )
 
     def test_query_scoring_mlp_exists(self, model):
@@ -379,12 +369,12 @@ class TestArchitecture:
         )
 
     def test_confidence_head_input_dim(self, model):
-        """Confidence head input should be 2*decoder_dim (query + pointed_context)."""
+        """Confidence head input should be decoder_dim (query only)."""
         first_linear = model.head.confidence_head[0]
-        expected_input_dim = 2 * model.head.decoder_dim
+        expected_input_dim = model.head.decoder_dim
         assert first_linear.in_features == expected_input_dim, (
             f"Confidence head input dim should be {expected_input_dim} "
-            f"(2 × decoder_dim), got {first_linear.in_features}"
+            f"(decoder_dim), got {first_linear.in_features}"
         )
 
     def test_gradient_flow_through_mask_logits(self, model, sample_training_inputs):

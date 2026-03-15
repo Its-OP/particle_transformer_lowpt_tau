@@ -35,8 +35,8 @@ CONDA_ENV_NAME="part"
 # Default training arguments (can be overridden via command-line)
 DATA_CONFIG="data/low-pt/lowpt_tau_trackfinder.yaml"
 DATA_DIR="data/low-pt/"
-NETWORK="networks/lowpt_tau_TrackFinder.py"
-MODEL_NAME="TrackFinder"
+NETWORK="networks/lowpt_tau_TrackFinderOC.py"
+MODEL_NAME="TrackFinderOC"
 EXPERIMENTS_DIR="experiments"
 PRETRAINED_BACKBONE="models/backbone_best.pt"
 EPOCHS=50
@@ -51,13 +51,9 @@ DEVICE="cuda:0"
 STEPS_PER_EPOCH=500
 NUM_WORKERS=4
 NO_COMPILE=false
-# Loss weights: rebalanced from ptr=5.0/conf=1.0 to ptr=2.0/conf=5.0
-# so confidence loss receives meaningful gradient signal
-POINTER_LOSS_WEIGHT=2.0
-CONFIDENCE_LOSS_WEIGHT=5.0
-# DETR-style no-object coefficient (eos_coef):
-# Downweights empty (∅) targets in confidence BCE to prevent trivial solutions
-EOS_COEF=0.1
+# Object condensation loss weights
+POTENTIAL_LOSS_WEIGHT=1.0
+BETA_LOSS_WEIGHT=1.0
 # Keep top K best checkpoints by val loss (0 = keep all, for CERN cluster runs)
 KEEP_BEST_K=5
 
@@ -104,9 +100,8 @@ TRAIN_CMD="${CONDA_INIT} && cd ${SCRIPT_DIR} && python train_trackfinder.py \
     --scheduler ${SCHEDULER} \
     --device ${DEVICE} \
     --num-workers ${NUM_WORKERS} \
-    --pointer-loss-weight ${POINTER_LOSS_WEIGHT} \
-    --confidence-loss-weight ${CONFIDENCE_LOSS_WEIGHT} \
-    --eos-coef ${EOS_COEF} \
+    --potential-loss-weight ${POTENTIAL_LOSS_WEIGHT} \
+    --beta-loss-weight ${BETA_LOSS_WEIGHT} \
     --keep-best-k ${KEEP_BEST_K} \
     --amp"
 
@@ -157,7 +152,7 @@ echo "Batch size: ${BATCH_SIZE}"
 echo "LR:         ${LEARNING_RATE}"
 echo "Scheduler:  ${SCHEDULER}"
 echo "Device:     ${DEVICE}"
-echo "Loss wts:   ptr=${POINTER_LOSS_WEIGHT}, conf=${CONFIDENCE_LOSS_WEIGHT}, eos=${EOS_COEF}"
+echo "Loss wts:   potential=${POTENTIAL_LOSS_WEIGHT}, beta=${BETA_LOSS_WEIGHT}"
 echo "AMP:        enabled"
 if [ "$NO_COMPILE" = true ]; then
     echo "Compile:    disabled"

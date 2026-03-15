@@ -390,6 +390,85 @@ class TestArchitecture:
             f"(2 × decoder_dim), got {first_linear.in_features}"
         )
 
+    def test_backbone_compact_tokens_are_diverse(self, model):
+        """Compact tokens from the backbone should be sufficiently diverse
+        before entering the encoder, both across events and within each event.
+
+        If backbone compact tokens are already near-identical (high cosine
+        similarity), the encoder cannot produce meaningful event-specific
+        representations regardless of norm_first setting.
+
+        Checks:
+            1. Cross-event: same token index across different events should
+               NOT be identical (cosine sim < 0.95).
+            2. Within-event: different token indices within the same event
+               should NOT all collapse to the same vector (mean pairwise
+               cosine sim < 0.9).
+        """
+        # Create two batches with distinctly different inputs
+        points_a, features_a, lorentz_vectors_a = _make_physical_inputs(
+            2, NUM_TRACKS, seed=42,
+        )
+        points_b, features_b, lorentz_vectors_b = _make_physical_inputs(
+            2, NUM_TRACKS, seed=999,
+        )
+        mask = torch.ones(2, 1, NUM_TRACKS)
+
+        model.eval()
+        with torch.no_grad():
+            # Run backbone enrichment + compaction for both batches
+            enriched_a = model.backbone.enrich(
+                points_a, features_a, lorentz_vectors_a, mask,
+            )
+            compact_tokens_a, _ = model.backbone.compact(
+                points_a, enriched_a, mask,
+            )  # (2, 256, 128)
+
+            enriched_b = model.backbone.enrich(
+                points_b, features_b, lorentz_vectors_b, mask,
+            )
+            compact_tokens_b, _ = model.backbone.compact(
+                points_b, enriched_b, mask,
+            )  # (2, 256, 128)
+
+        # --- Check 1: Cross-event diversity ---
+        # Compare matching token indices across different input events.
+        # Shape: (128, 256) for each — transpose to get tokens as rows.
+        tokens_event_0a = compact_tokens_a[0].T  # (128, 256)
+        tokens_event_0b = compact_tokens_b[0].T  # (128, 256)
+
+        # Normalize for cosine similarity
+        normalized_a = torch.nn.functional.normalize(tokens_event_0a, dim=1)
+        normalized_b = torch.nn.functional.normalize(tokens_event_0b, dim=1)
+
+        # Per-token cosine similarity across events: cos(token_i^A, token_i^B)
+        cross_event_cosine = (normalized_a * normalized_b).sum(dim=1)  # (128,)
+        mean_cross_event = cross_event_cosine.mean().item()
+
+        assert mean_cross_event < 0.95, (
+            f"Backbone compact tokens are too similar across different events: "
+            f"mean cosine similarity = {mean_cross_event:.4f} (should be < 0.95). "
+            f"The encoder cannot produce diverse event representations if its "
+            f"input tokens are already near-identical."
+        )
+
+        # --- Check 2: Within-event diversity ---
+        # Different tokens within the same event should capture different aspects.
+        # Compute pairwise cosine similarity matrix for tokens in event 0.
+        within_event_cosine_matrix = normalized_a @ normalized_a.T  # (128, 128)
+
+        # Exclude diagonal (self-similarity = 1.0)
+        num_tokens = within_event_cosine_matrix.shape[0]
+        off_diagonal_mask = ~torch.eye(num_tokens, dtype=torch.bool)
+        mean_within_event = within_event_cosine_matrix[off_diagonal_mask].mean().item()
+
+        assert mean_within_event < 0.9, (
+            f"Backbone compact tokens within the same event are too similar: "
+            f"mean pairwise cosine similarity = {mean_within_event:.4f} "
+            f"(should be < 0.9). Tokens should capture different spatial "
+            f"aspects of the event."
+        )
+
     def test_pointer_context_gradient_flow(self, model, sample_training_inputs):
         """Confidence loss should flow gradients through pointer_context_projection
         and into pointer_logits, providing additional training signal.

@@ -227,110 +227,92 @@ def extract_label_from_inputs(
 
 
 @torch.no_grad()
-def compute_evaluation_metrics(
-    pointer_logits: torch.Tensor,
-    confidence_logits: torch.Tensor,
+def compute_recall_at_k_metrics(
+    beta_scores: torch.Tensor,
     track_labels: torch.Tensor,
     mask: torch.Tensor,
-    confidence_threshold: float = 0.0,
+    k_values: tuple[int, ...] = (10, 20, 30),
 ) -> dict[str, float]:
-    """Compute track-finding evaluation metrics.
+    """Compute recall@K and ranking quality metrics for object condensation.
 
-    Metrics:
-        - track_finding_efficiency: fraction of GT tracks found by any
-          confident query (i.e. recall).
-        - fake_rate: fraction of confident queries not pointing to any
-          GT track (i.e. 1 - precision among confident queries).
-        - perfect_event_rate: fraction of events where all GT tracks are
-          found exactly (no missed, no fakes).
-        - confidence_accuracy: binary accuracy of exists/empty classification
-          using the Hungarian-optimal assignment as ground truth.
+    Tracks are ranked by beta score (descending). For each K, recall@K is
+    the fraction of GT pion tracks found in the top-K predictions.
 
     Args:
-        pointer_logits: (B, num_queries, P) pointer scores.
-        confidence_logits: (B, num_queries) confidence scores (pre-sigmoid).
-        track_labels: (B, 1, P) binary labels (1.0 = tau track).
+        beta_scores: (B, P) per-track beta confidence scores ∈ (0, 1).
+        track_labels: (B, 1, P) binary labels (1.0 = tau pion).
         mask: (B, 1, P) boolean mask (True = valid track).
-        confidence_threshold: Sigmoid threshold for "confident" queries
-            (default: 0.0 logit = 0.5 probability).
+        k_values: Tuple of K values for recall@K (default: 10, 20, 30).
 
     Returns:
-        Dict of metric name → float value.
+        Dict with recall@K for each K, plus signal/background beta stats.
     """
-    batch_size = pointer_logits.shape[0]
-
-    # Predicted track index for each query: argmax over valid tracks
-    # (padded positions are -inf, so argmax ignores them)
-    predicted_track_indices = pointer_logits.argmax(dim=2)  # (B, num_queries)
-
-    # Confident queries: sigmoid(confidence_logits) > 0.5
-    confident_mask = confidence_logits > confidence_threshold  # (B, num_queries)
-
-    # Ground truth track indices
+    batch_size = beta_scores.shape[0]
     labels_flat = track_labels.squeeze(1) * mask.squeeze(1).float()  # (B, P)
 
-    total_gt_tracks = 0
-    found_gt_tracks = 0
-    total_confident_queries = 0
-    fake_confident_queries = 0
-    perfect_events = 0
+    # Mask out padded tracks (set beta to -1 so they rank last)
+    masked_beta = beta_scores.clone()
+    masked_beta[~mask.squeeze(1).bool()] = -1.0
+
+    # Sort tracks by beta descending
+    sorted_indices = masked_beta.argsort(dim=1, descending=True)  # (B, P)
+
+    # Initialize recall accumulators
+    recall_sums = {k: 0.0 for k in k_values}
     total_events_with_gt = 0
+    total_gt_tracks = 0
+    found_at_max_k = 0
+
+    # Signal/background beta statistics
+    signal_beta_sum = 0.0
+    background_beta_sum = 0.0
+    total_signal_tracks = 0
+    total_background_tracks = 0
 
     for batch_index in range(batch_size):
-        # GT track indices for this event
         gt_positions = labels_flat[batch_index].nonzero(as_tuple=True)[0]
         gt_set = set(gt_positions.tolist())
         num_gt = len(gt_set)
 
-        # Confident query predictions for this event
-        event_confident = confident_mask[batch_index]  # (num_queries,)
-        event_predictions = predicted_track_indices[batch_index]  # (num_queries,)
+        if num_gt == 0:
+            continue
 
-        confident_predictions = event_predictions[event_confident].tolist()
-
-        # Track-finding efficiency (recall)
+        total_events_with_gt += 1
         total_gt_tracks += num_gt
-        found_set = set(confident_predictions) & gt_set
-        found_gt_tracks += len(found_set)
 
-        # Fake rate (among confident queries)
-        num_confident = len(confident_predictions)
-        total_confident_queries += num_confident
-        num_fakes = sum(
-            1 for prediction in confident_predictions
-            if prediction not in gt_set
-        )
-        fake_confident_queries += num_fakes
+        # Top-K track indices for each K
+        event_sorted = sorted_indices[batch_index].tolist()
+        for k in k_values:
+            top_k_set = set(event_sorted[:k])
+            found = len(top_k_set & gt_set)
+            recall_sums[k] += found / num_gt
 
-        # Perfect event rate
-        if num_gt > 0:
-            total_events_with_gt += 1
-            is_perfect = (
-                found_set == gt_set  # all GT found
-                and num_fakes == 0   # no fakes
-            )
-            if is_perfect:
-                perfect_events += 1
+        # Track max-K recall for overall found count
+        max_k = max(k_values)
+        top_max_k_set = set(event_sorted[:max_k])
+        found_at_max_k += len(top_max_k_set & gt_set)
 
-    track_finding_efficiency = (
-        found_gt_tracks / max(1, total_gt_tracks)
-    )
-    fake_rate = (
-        fake_confident_queries / max(1, total_confident_queries)
-    )
-    perfect_event_rate = (
-        perfect_events / max(1, total_events_with_gt)
-    )
+        # Signal vs background beta
+        event_beta = beta_scores[batch_index]
+        event_labels = labels_flat[batch_index]
+        signal_mask_event = event_labels.bool()
+        background_mask_event = (~signal_mask_event) & mask.squeeze(1)[batch_index].bool()
 
-    return {
-        'track_finding_efficiency': track_finding_efficiency,
-        'fake_rate': fake_rate,
-        'perfect_event_rate': perfect_event_rate,
-        'total_gt_tracks': total_gt_tracks,
-        'found_gt_tracks': found_gt_tracks,
-        'total_confident_queries': total_confident_queries,
-        'fake_confident_queries': fake_confident_queries,
-    }
+        signal_beta_sum += event_beta[signal_mask_event].sum().item()
+        background_beta_sum += event_beta[background_mask_event].sum().item()
+        total_signal_tracks += signal_mask_event.sum().item()
+        total_background_tracks += background_mask_event.sum().item()
+
+    metrics = {}
+    for k in k_values:
+        metrics[f'recall_at_{k}'] = recall_sums[k] / max(1, total_events_with_gt)
+
+    metrics['total_gt_tracks'] = total_gt_tracks
+    metrics[f'found_gt_tracks_at_{max(k_values)}'] = found_at_max_k
+    metrics['mean_beta_signal'] = signal_beta_sum / max(1, total_signal_tracks)
+    metrics['mean_beta_background'] = background_beta_sum / max(1, total_background_tracks)
+
+    return metrics
 
 
 def train_one_epoch(
@@ -373,8 +355,8 @@ def train_one_epoch(
     model.train()
     loss_accumulators = {
         'total_loss': 0.0,
-        'pointer_focal_loss': 0.0,
-        'confidence_bce_loss': 0.0,
+        'potential_loss': 0.0,
+        'beta_loss': 0.0,
     }
     num_batches = 0
     start_time = time.time()
@@ -453,13 +435,13 @@ def train_one_epoch(
                 'Loss/train_batch', loss.item(), global_batch_count,
             )
             tensorboard_writer.add_scalar(
-                'Loss/pointer_focal_batch',
-                loss_dict['pointer_focal_loss'].item(),
+                'Loss/potential_batch',
+                loss_dict['potential_loss'].item(),
                 global_batch_count,
             )
             tensorboard_writer.add_scalar(
-                'Loss/confidence_bce_batch',
-                loss_dict['confidence_bce_loss'].item(),
+                'Loss/beta_batch',
+                loss_dict['beta_loss'].item(),
                 global_batch_count,
             )
             tensorboard_writer.add_scalar(
@@ -474,8 +456,8 @@ def train_one_epoch(
                 f'Epoch {epoch} | Batch {batch_index} | '
                 f'Loss: {loss.item():.5f} | '
                 f'Avg Loss: {avg_total:.5f} | '
-                f'Ptr: {loss_dict["pointer_focal_loss"].item():.5f} | '
-                f'Conf: {loss_dict["confidence_bce_loss"].item():.5f} | '
+                f'Pot: {loss_dict["potential_loss"].item():.5f} | '
+                f'Beta: {loss_dict["beta_loss"].item():.5f} | '
                 f'LR: {current_lr:.2e} | '
                 f'Time: {elapsed:.1f}s',
             )
@@ -517,17 +499,18 @@ def validate(
     model.eval()
     loss_accumulators = {
         'total_loss': 0.0,
-        'pointer_focal_loss': 0.0,
-        'confidence_bce_loss': 0.0,
+        'potential_loss': 0.0,
+        'beta_loss': 0.0,
     }
-    # Aggregate metrics across batches
-    metrics_accumulators = {
-        'total_gt_tracks': 0,
-        'found_gt_tracks': 0,
-        'total_confident_queries': 0,
-        'fake_confident_queries': 0,
-    }
-    perfect_events = 0
+    # Aggregate recall@K metrics across batches
+    recall_k_values = (10, 20, 30)
+    recall_sums = {k: 0.0 for k in recall_k_values}
+    total_gt_tracks = 0
+    found_gt_at_max_k = 0
+    signal_beta_sum = 0.0
+    background_beta_sum = 0.0
+    total_signal = 0
+    total_background = 0
     total_events_with_gt = 0
     num_batches = 0
 
@@ -550,31 +533,44 @@ def validate(
             for key in loss_accumulators:
                 loss_accumulators[key] += loss_dict[key].item()
 
-            # Get logits for evaluation metrics
-            logits_dict = model(*model_inputs)
+            # Get beta scores for recall@K metrics
+            output_dict = model(*model_inputs)
             mask_tensor = model_inputs[
-                # After label extraction, mask index may shift.
                 # pf_mask is always at index 3 in model_inputs
                 # (pf_points=0, pf_features=1, pf_vectors=2, pf_mask=3)
                 3
             ]
 
-            batch_metrics = compute_evaluation_metrics(
-                logits_dict['pointer_logits'],
-                logits_dict['confidence_logits'],
+            batch_metrics = compute_recall_at_k_metrics(
+                output_dict['beta_scores'],
                 track_labels,
                 mask_tensor,
+                k_values=recall_k_values,
             )
 
-            for key in ['total_gt_tracks', 'found_gt_tracks',
-                        'total_confident_queries', 'fake_confident_queries']:
-                metrics_accumulators[key] += batch_metrics[key]
+            # Accumulate recall@K (weighted by number of events with GT)
+            for k in recall_k_values:
+                recall_sums[k] += (
+                    batch_metrics[f'recall_at_{k}']
+                    * batch_metrics.get('total_gt_tracks', 0)
+                    / max(1, batch_metrics.get('total_gt_tracks', 1))
+                    * (batch_metrics['total_gt_tracks'] > 0)
+                )
+            total_gt_tracks += batch_metrics['total_gt_tracks']
+            found_gt_at_max_k += batch_metrics.get(
+                f'found_gt_tracks_at_{max(recall_k_values)}', 0,
+            )
+            signal_beta_sum += (
+                batch_metrics['mean_beta_signal']
+                * batch_metrics['total_gt_tracks']
+            )
+            background_beta_sum += batch_metrics['mean_beta_background'] * 1
+            total_signal += batch_metrics['total_gt_tracks']
 
             num_batches += 1
 
-            # Free batch tensors to reduce peak memory between iterations
             del inputs, model_inputs, track_labels, loss_dict
-            del logits_dict, mask_tensor, batch_metrics
+            del output_dict, mask_tensor, batch_metrics
 
     # Average losses
     loss_averages = {
@@ -582,18 +578,16 @@ def validate(
         for key, value in loss_accumulators.items()
     }
 
-    # Aggregate metrics
+    # Re-compute metrics across entire validation set
+    # For clean aggregation, re-run compute_recall_at_k_metrics
+    # on accumulated stats
     metrics = {
-        'track_finding_efficiency': (
-            metrics_accumulators['found_gt_tracks']
-            / max(1, metrics_accumulators['total_gt_tracks'])
-        ),
-        'fake_rate': (
-            metrics_accumulators['fake_confident_queries']
-            / max(1, metrics_accumulators['total_confident_queries'])
-        ),
-        'total_gt_tracks': metrics_accumulators['total_gt_tracks'],
-        'found_gt_tracks': metrics_accumulators['found_gt_tracks'],
+        'recall_at_10': recall_sums[10] / max(1, num_batches),
+        'recall_at_20': recall_sums[20] / max(1, num_batches),
+        'recall_at_30': recall_sums[30] / max(1, num_batches),
+        'total_gt_tracks': total_gt_tracks,
+        'mean_beta_signal': signal_beta_sum / max(1, total_signal),
+        'mean_beta_background': background_beta_sum / max(1, num_batches),
     }
 
     return loss_averages, metrics
@@ -655,17 +649,14 @@ def main():
                              'infinite SimpleIterDataset)')
     parser.add_argument('--num-enrichment-layers', type=int, default=None,
                         help='Number of backbone enrichment layers')
-    parser.add_argument('--num-encoder-layers', type=int, default=None,
-                        help='Number of compact token encoder layers')
-    parser.add_argument('--num-decoder-layers', type=int, default=None,
-                        help='Number of query decoder layers')
-    parser.add_argument('--pointer-loss-weight', type=float, default=2.0,
-                        help='Weight for pointer focal loss (default: 2.0)')
-    parser.add_argument('--confidence-loss-weight', type=float, default=5.0,
-                        help='Weight for confidence BCE loss (default: 5.0)')
-    parser.add_argument('--eos-coef', type=float, default=0.1,
-                        help='DETR-style no-object coefficient for confidence '
-                             'BCE. Downweights empty targets (default: 0.1)')
+    parser.add_argument('--potential-loss-weight', type=float, default=1.0,
+                        help='Weight for attractive + repulsive potential loss '
+                             '(default: 1.0)')
+    parser.add_argument('--beta-loss-weight', type=float, default=1.0,
+                        help='Weight for beta loss (default: 1.0)')
+    parser.add_argument('--clustering-dim', type=int, default=8,
+                        help='Dimensionality of learned clustering space '
+                             '(default: 8)')
     parser.add_argument('--save-every', type=int, default=10,
                         help='Save checkpoint every N epochs')
     parser.add_argument('--keep-best-k', type=int, default=5,
@@ -793,15 +784,11 @@ def main():
         model_kwargs['pretrained_backbone_path'] = args.pretrained_backbone
     if args.num_enrichment_layers is not None:
         model_kwargs['num_enrichment_layers'] = args.num_enrichment_layers
-    if args.num_encoder_layers is not None:
-        model_kwargs['num_encoder_layers'] = args.num_encoder_layers
-    if args.num_decoder_layers is not None:
-        model_kwargs['num_decoder_layers'] = args.num_decoder_layers
 
-    # Loss weights: rebalanced from ptr=5.0/conf=1.0 to ptr=2.0/conf=5.0
-    model_kwargs['pointer_loss_weight'] = args.pointer_loss_weight
-    model_kwargs['confidence_loss_weight'] = args.confidence_loss_weight
-    model_kwargs['eos_coef'] = args.eos_coef
+    # Object condensation loss weights
+    model_kwargs['potential_loss_weight'] = args.potential_loss_weight
+    model_kwargs['beta_loss_weight'] = args.beta_loss_weight
+    model_kwargs['clustering_dim'] = args.clustering_dim
 
     model, model_info = network_module.get_model(data_config, **model_kwargs)
     model = model.to(device)
@@ -817,9 +804,8 @@ def main():
     )
     logger.info(f'Input names: {data_config.input_names}')
     logger.info(
-        f'Loss weights: pointer={args.pointer_loss_weight}, '
-        f'confidence={args.confidence_loss_weight}, '
-        f'eos_coef={args.eos_coef}',
+        f'Loss weights: potential={args.potential_loss_weight}, '
+        f'beta={args.beta_loss_weight}',
     )
 
     # Find input indices for pf_mask and pf_label
@@ -911,8 +897,8 @@ def main():
     global_batch_count = 0
     loss_history = {
         'train': [], 'val': [], 'lr': [],
-        'pointer_focal': [], 'confidence_bce': [],
-        'track_finding_efficiency': [], 'fake_rate': [],
+        'potential': [], 'beta': [],
+        'recall_at_10': [], 'recall_at_20': [], 'recall_at_30': [],
     }
 
     if args.resume is not None:
@@ -951,8 +937,8 @@ def main():
         logger.info(
             f'Epoch {epoch} train | '
             f'total: {train_losses["total_loss"]:.5f} | '
-            f'ptr: {train_losses["pointer_focal_loss"]:.5f} | '
-            f'conf: {train_losses["confidence_bce_loss"]:.5f}',
+            f'pot: {train_losses["potential_loss"]:.5f} | '
+            f'beta: {train_losses["beta_loss"]:.5f}',
         )
 
         # Free training memory before validation to reduce peak usage.
@@ -986,8 +972,9 @@ def main():
             logger.info(
                 f'Epoch {epoch} val | '
                 f'total: {val_loss:.5f} ★ new best | '
-                f'efficiency: {val_metrics["track_finding_efficiency"]:.4f} | '
-                f'fake_rate: {val_metrics["fake_rate"]:.4f}',
+                f'R@10: {val_metrics["recall_at_10"]:.4f} | '
+                f'R@20: {val_metrics["recall_at_20"]:.4f} | '
+                f'R@30: {val_metrics["recall_at_30"]:.4f}',
             )
         else:
             epochs_since_best = epoch - best_val_epoch
@@ -996,8 +983,9 @@ def main():
                 f'total: {val_loss:.5f} '
                 f'(best: {best_val_loss:.5f}, '
                 f'{epochs_since_best} epochs ago) | '
-                f'efficiency: {val_metrics["track_finding_efficiency"]:.4f} | '
-                f'fake_rate: {val_metrics["fake_rate"]:.4f}',
+                f'R@10: {val_metrics["recall_at_10"]:.4f} | '
+                f'R@20: {val_metrics["recall_at_20"]:.4f} | '
+                f'R@30: {val_metrics["recall_at_30"]:.4f}',
             )
 
         # LR scheduler step
@@ -1017,17 +1005,19 @@ def main():
             'Loss/val_epoch', val_loss, epoch,
         )
         tensorboard_writer.add_scalar(
-            'Loss/val_pointer_focal', val_losses['pointer_focal_loss'], epoch,
+            'Loss/val_potential', val_losses['potential_loss'], epoch,
         )
         tensorboard_writer.add_scalar(
-            'Loss/val_confidence_bce', val_losses['confidence_bce_loss'], epoch,
+            'Loss/val_beta', val_losses['beta_loss'], epoch,
         )
         tensorboard_writer.add_scalar(
-            'Metrics/track_finding_efficiency',
-            val_metrics['track_finding_efficiency'], epoch,
+            'Metrics/recall_at_10', val_metrics['recall_at_10'], epoch,
         )
         tensorboard_writer.add_scalar(
-            'Metrics/fake_rate', val_metrics['fake_rate'], epoch,
+            'Metrics/recall_at_20', val_metrics['recall_at_20'], epoch,
+        )
+        tensorboard_writer.add_scalar(
+            'Metrics/recall_at_30', val_metrics['recall_at_30'], epoch,
         )
         tensorboard_writer.add_scalar('LR/epoch', current_lr, epoch)
 
@@ -1035,16 +1025,11 @@ def main():
         loss_history['train'].append(train_losses['total_loss'])
         loss_history['val'].append(val_loss)
         loss_history['lr'].append(current_lr)
-        loss_history['pointer_focal'].append(
-            val_losses['pointer_focal_loss'],
-        )
-        loss_history['confidence_bce'].append(
-            val_losses['confidence_bce_loss'],
-        )
-        loss_history['track_finding_efficiency'].append(
-            val_metrics['track_finding_efficiency'],
-        )
-        loss_history['fake_rate'].append(val_metrics['fake_rate'])
+        loss_history['potential'].append(val_losses['potential_loss'])
+        loss_history['beta'].append(val_losses['beta_loss'])
+        loss_history['recall_at_10'].append(val_metrics['recall_at_10'])
+        loss_history['recall_at_20'].append(val_metrics['recall_at_20'])
+        loss_history['recall_at_30'].append(val_metrics['recall_at_30'])
         save_loss_history(loss_history, experiment_dir)
 
         # Checkpointing
@@ -1149,8 +1134,8 @@ def main():
             logger.info(
                 f'Epoch {epoch} train | '
                 f'total: {train_losses["total_loss"]:.5f} | '
-                f'ptr: {train_losses["pointer_focal_loss"]:.5f} | '
-                f'conf: {train_losses["confidence_bce_loss"]:.5f}',
+                f'pot: {train_losses["potential_loss"]:.5f} | '
+                f'beta: {train_losses["beta_loss"]:.5f}',
             )
 
             # Free training memory before validation
@@ -1181,8 +1166,9 @@ def main():
                 f'Epoch {epoch} val | '
                 f'total: {val_loss:.5f}'
                 f'{" ★ new best" if is_best else ""} | '
-                f'efficiency: {val_metrics["track_finding_efficiency"]:.4f} | '
-                f'fake_rate: {val_metrics["fake_rate"]:.4f}',
+                f'R@10: {val_metrics["recall_at_10"]:.4f} | '
+                f'R@20: {val_metrics["recall_at_20"]:.4f} | '
+                f'R@30: {val_metrics["recall_at_30"]:.4f}',
             )
 
             previous_lr = scheduler.get_last_lr()[0]
@@ -1195,11 +1181,13 @@ def main():
             )
             tensorboard_writer.add_scalar('Loss/val_epoch', val_loss, epoch)
             tensorboard_writer.add_scalar(
-                'Metrics/track_finding_efficiency',
-                val_metrics['track_finding_efficiency'], epoch,
+                'Metrics/recall_at_10', val_metrics['recall_at_10'], epoch,
             )
             tensorboard_writer.add_scalar(
-                'Metrics/fake_rate', val_metrics['fake_rate'], epoch,
+                'Metrics/recall_at_20', val_metrics['recall_at_20'], epoch,
+            )
+            tensorboard_writer.add_scalar(
+                'Metrics/recall_at_30', val_metrics['recall_at_30'], epoch,
             )
             tensorboard_writer.add_scalar('LR/epoch', current_lr, epoch)
 
@@ -1207,16 +1195,11 @@ def main():
             loss_history['train'].append(train_losses['total_loss'])
             loss_history['val'].append(val_loss)
             loss_history['lr'].append(current_lr)
-            loss_history['pointer_focal'].append(
-                val_losses['pointer_focal_loss'],
-            )
-            loss_history['confidence_bce'].append(
-                val_losses['confidence_bce_loss'],
-            )
-            loss_history['track_finding_efficiency'].append(
-                val_metrics['track_finding_efficiency'],
-            )
-            loss_history['fake_rate'].append(val_metrics['fake_rate'])
+            loss_history['potential'].append(val_losses['potential_loss'])
+            loss_history['beta'].append(val_losses['beta_loss'])
+            loss_history['recall_at_10'].append(val_metrics['recall_at_10'])
+            loss_history['recall_at_20'].append(val_metrics['recall_at_20'])
+            loss_history['recall_at_30'].append(val_metrics['recall_at_30'])
             save_loss_history(loss_history, experiment_dir)
 
             # Checkpointing

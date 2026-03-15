@@ -226,94 +226,86 @@ def extract_label_from_inputs(
     return model_inputs, track_labels
 
 
-@torch.no_grad()
-def compute_recall_at_k_metrics(
-    mask_logits: torch.Tensor,
-    confidence_logits: torch.Tensor,
-    track_labels: torch.Tensor,
-    mask: torch.Tensor,
-) -> dict[str, float]:
-    """Compute recall@K metrics for mask-based DETR track finding.
+def extract_per_track_scores(output_dict: dict[str, torch.Tensor]) -> torch.Tensor:
+    """Extract per-track ranking scores from any head's inference output.
 
-    For each track, computes a "track score" as the maximum mask logit
-    across all queries:
-        score_p = max_q mask_logits[q, p]
-
-    Tracks are sorted by score descending. Recall@K is the fraction of
-    ground-truth tracks found among the top-K scored tracks.
+    Supports both OC and DETR heads:
+        - OC: output_dict['beta_scores'] → (B, P) direct per-track scores
+        - DETR: output_dict['mask_logits'] → (B, Q, P) → max over queries → (B, P)
 
     Args:
-        mask_logits: (B, num_queries, P) per-query mask scores.
-        confidence_logits: (B, num_queries) confidence scores (unused
-            for recall@K but accepted for API consistency).
-        track_labels: (B, 1, P) binary labels (1.0 = tau track).
-        mask: (B, 1, P) boolean mask (True = valid track).
+        output_dict: Model inference output dict.
 
     Returns:
-        Dict with recall_at_10, recall_at_20, recall_at_30,
-        total_gt_tracks, mean_score_signal, mean_score_background.
+        per_track_scores: (B, P) scores for ranking tracks (higher = more likely tau).
     """
-    batch_size = mask_logits.shape[0]
+    if 'beta_scores' in output_dict:
+        return output_dict['beta_scores']
+    elif 'mask_logits' in output_dict:
+        return output_dict['mask_logits'].max(dim=1).values
+    else:
+        raise KeyError(
+            f'Cannot extract per-track scores from output keys: '
+            f'{list(output_dict.keys())}. Expected "beta_scores" (OC) '
+            f'or "mask_logits" (DETR).',
+        )
 
-    # Per-track score: max mask logit across all queries
-    # score_p = max_q mask_logits[:, q, p]  →  (B, P)
-    per_track_scores = mask_logits.max(dim=1).values  # (B, P)
 
-    # Ground truth labels and valid mask as flat (B, P)
-    labels_flat = track_labels.squeeze(1)  # (B, P)
-    valid_flat = mask.squeeze(1).float()   # (B, P)
+@torch.no_grad()
+def compute_recall_at_k_metrics(
+    per_track_scores: torch.Tensor,
+    track_labels: torch.Tensor,
+    mask: torch.Tensor,
+    k_values: tuple[int, ...] = (10, 20, 30),
+) -> dict[str, float]:
+    """Compute recall@K metrics for track finding (head-agnostic).
 
-    k_values = [10, 20, 30]
+    Tracks are ranked by score (descending). For each K, recall@K is
+    the fraction of GT pion tracks found in the top-K predictions.
+
+    Args:
+        per_track_scores: (B, P) per-track ranking scores.
+        track_labels: (B, 1, P) binary labels (1.0 = tau pion).
+        mask: (B, 1, P) boolean mask (True = valid track).
+        k_values: Tuple of K values for recall@K (default: 10, 20, 30).
+
+    Returns:
+        Dict with recall_at_K for each K, plus total_gt_tracks.
+    """
+    batch_size = per_track_scores.shape[0]
+    labels_flat = track_labels.squeeze(1) * mask.squeeze(1).float()
+
+    masked_scores = per_track_scores.clone()
+    masked_scores[~mask.squeeze(1).bool()] = float('-inf')
+    sorted_indices = masked_scores.argsort(dim=1, descending=True)
+
     recall_sums = {k: 0.0 for k in k_values}
+    total_events_with_gt = 0
     total_gt_tracks = 0
-    total_events = 0
-    signal_score_sum = 0.0
-    signal_count = 0
-    background_score_sum = 0.0
-    background_count = 0
 
     for batch_index in range(batch_size):
-        valid_mask = valid_flat[batch_index].bool()  # (P,)
-        event_labels = labels_flat[batch_index][valid_mask]  # (P_valid,)
-        event_scores = per_track_scores[batch_index][valid_mask]  # (P_valid,)
+        gt_positions = labels_flat[batch_index].nonzero(as_tuple=True)[0]
+        gt_set = set(gt_positions.tolist())
+        num_gt = len(gt_set)
 
-        num_gt = int(event_labels.sum().item())
         if num_gt == 0:
             continue
 
+        total_events_with_gt += 1
         total_gt_tracks += num_gt
-        total_events += 1
 
-        # Signal/background score statistics
-        signal_mask = event_labels.bool()
-        signal_score_sum += event_scores[signal_mask].sum().item()
-        signal_count += signal_mask.sum().item()
-        background_mask = ~signal_mask
-        background_score_sum += event_scores[background_mask].sum().item()
-        background_count += background_mask.sum().item()
-
-        # Sort tracks by score descending
-        sorted_indices = event_scores.argsort(descending=True)
-        sorted_labels = event_labels[sorted_indices]
-
-        # Recall@K = (# GT tracks in top-K) / (# GT tracks total)
+        event_sorted = sorted_indices[batch_index].tolist()
         for k in k_values:
-            top_k_labels = sorted_labels[:k]
-            found_in_top_k = int(top_k_labels.sum().item())
-            recall_sums[k] += found_in_top_k / num_gt
+            top_k_set = set(event_sorted[:k])
+            found = len(top_k_set & gt_set)
+            recall_sums[k] += found / num_gt
 
-    mean_recall = {
-        k: recall_sums[k] / max(1, total_events) for k in k_values
-    }
+    metrics = {}
+    for k in k_values:
+        metrics[f'recall_at_{k}'] = recall_sums[k] / max(1, total_events_with_gt)
+    metrics['total_gt_tracks'] = total_gt_tracks
 
-    return {
-        'recall_at_10': mean_recall[10],
-        'recall_at_20': mean_recall[20],
-        'recall_at_30': mean_recall[30],
-        'total_gt_tracks': total_gt_tracks,
-        'mean_score_signal': signal_score_sum / max(1, signal_count),
-        'mean_score_background': background_score_sum / max(1, background_count),
-    }
+    return metrics
 
 
 def train_one_epoch(
@@ -354,11 +346,7 @@ def train_one_epoch(
         Tuple of (loss_averages dict, updated global_batch_count).
     """
     model.train()
-    loss_accumulators = {
-        'total_loss': 0.0,
-        'mask_ce_loss': 0.0,
-        'confidence_loss': 0.0,
-    }
+    loss_accumulators: dict[str, float] | None = None
     num_batches = 0
     start_time = time.time()
 
@@ -424,7 +412,9 @@ def train_one_epoch(
 
         scheduler.step_batch()
 
-        # Accumulate losses
+        # Accumulate losses (initialize from first batch's keys)
+        if loss_accumulators is None:
+            loss_accumulators = {key: 0.0 for key in loss_dict}
         for key in loss_accumulators:
             loss_accumulators[key] += loss_dict[key].item()
         num_batches += 1
@@ -435,16 +425,11 @@ def train_one_epoch(
             tensorboard_writer.add_scalar(
                 'Loss/train_batch', loss.item(), global_batch_count,
             )
-            tensorboard_writer.add_scalar(
-                'Loss/mask_ce_batch',
-                loss_dict['mask_ce_loss'].item(),
-                global_batch_count,
-            )
-            tensorboard_writer.add_scalar(
-                'Loss/confidence_batch',
-                loss_dict['confidence_loss'].item(),
-                global_batch_count,
-            )
+            for key, value in loss_dict.items():
+                if key != 'total_loss':
+                    tensorboard_writer.add_scalar(
+                        f'Loss/{key}_batch', value.item(), global_batch_count,
+                    )
             tensorboard_writer.add_scalar(
                 'LR/train', scheduler.get_last_lr()[0], global_batch_count,
             )
@@ -453,12 +438,16 @@ def train_one_epoch(
             elapsed = time.time() - start_time
             current_lr = scheduler.get_last_lr()[0]
             avg_total = loss_accumulators['total_loss'] / max(1, num_batches)
+            component_parts = ' | '.join(
+                f'{key.replace("_loss", "")}: {value.item():.5f}'
+                for key, value in loss_dict.items()
+                if key != 'total_loss'
+            )
             logger.info(
                 f'Epoch {epoch} | Batch {batch_index} | '
                 f'Loss: {loss.item():.5f} | '
-                f'Avg Loss: {avg_total:.5f} | '
-                f'CE: {loss_dict["mask_ce_loss"].item():.5f} | '
-                f'Conf: {loss_dict["confidence_loss"].item():.5f} | '
+                f'Avg: {avg_total:.5f} | '
+                f'{component_parts} | '
                 f'LR: {current_lr:.2e} | '
                 f'Time: {elapsed:.1f}s',
             )
@@ -467,6 +456,8 @@ def train_one_epoch(
         del inputs, model_inputs, track_labels, loss_dict, loss
 
     # Average losses
+    if loss_accumulators is None:
+        loss_accumulators = {'total_loss': 0.0}
     loss_averages = {
         key: value / max(1, num_batches)
         for key, value in loss_accumulators.items()
@@ -498,16 +489,9 @@ def validate(
         Tuple of (loss_averages dict, metrics dict).
     """
     model.eval()
-    loss_accumulators = {
-        'total_loss': 0.0,
-        'mask_ce_loss': 0.0,
-        'confidence_loss': 0.0,
-    }
-    # Aggregate recall@K metrics across batches
+    loss_accumulators: dict[str, float] | None = None
     recall_accumulators = {
-        'recall_at_10': 0.0,
-        'recall_at_20': 0.0,
-        'recall_at_30': 0.0,
+        'recall_at_10': 0.0, 'recall_at_20': 0.0, 'recall_at_30': 0.0,
         'total_gt_tracks': 0,
     }
     num_batches = 0
@@ -528,43 +512,36 @@ def validate(
             loss_dict = model(*model_inputs, track_labels=track_labels)
             model.eval()
 
+            if loss_accumulators is None:
+                loss_accumulators = {key: 0.0 for key in loss_dict}
             for key in loss_accumulators:
                 loss_accumulators[key] += loss_dict[key].item()
 
-            # Get output for evaluation metrics
+            # Get per-track scores for recall@K (head-agnostic)
             output_dict = model(*model_inputs)
-            mask_tensor = model_inputs[
-                # After label extraction, mask index may shift.
-                # pf_mask is always at index 3 in model_inputs
-                # (pf_points=0, pf_features=1, pf_vectors=2, pf_mask=3)
-                3
-            ]
+            mask_tensor = model_inputs[3]
 
+            per_track_scores = extract_per_track_scores(output_dict)
             batch_metrics = compute_recall_at_k_metrics(
-                output_dict['mask_logits'],
-                output_dict['confidence_logits'],
-                track_labels,
-                mask_tensor,
+                per_track_scores, track_labels, mask_tensor,
             )
 
-            # Accumulate recall@K (weighted by batch event count)
             recall_accumulators['total_gt_tracks'] += batch_metrics['total_gt_tracks']
             for k_key in ['recall_at_10', 'recall_at_20', 'recall_at_30']:
                 recall_accumulators[k_key] += batch_metrics[k_key]
 
             num_batches += 1
 
-            # Free batch tensors to reduce peak memory between iterations
             del inputs, model_inputs, track_labels, loss_dict
             del output_dict, mask_tensor, batch_metrics
 
-    # Average losses
+    if loss_accumulators is None:
+        loss_accumulators = {'total_loss': 0.0}
     loss_averages = {
         key: value / max(1, num_batches)
         for key, value in loss_accumulators.items()
     }
 
-    # Average recall@K metrics across batches
     metrics = {
         'recall_at_10': recall_accumulators['recall_at_10'] / max(1, num_batches),
         'recall_at_20': recall_accumulators['recall_at_20'] / max(1, num_batches),
@@ -633,29 +610,42 @@ def main():
     parser.add_argument('--steps-per-epoch', type=int, default=None,
                         help='Training batches per epoch (required for '
                              'infinite SimpleIterDataset)')
+    # ---- Head selection ----
+    parser.add_argument('--oc', action='store_true',
+                        help='Use Object Condensation head instead of DETR '
+                             '(default: DETR mask-denoising head)')
+    # ---- Backbone args ----
     parser.add_argument('--num-enrichment-layers', type=int, default=None,
                         help='Number of backbone enrichment layers')
+    # ---- Head-specific args (only non-None values are passed to model) ----
+    # OC head
+    parser.add_argument('--focal-bce-weight', type=float, default=None,
+                        help='[OC] Weight for focal BCE classification loss')
+    parser.add_argument('--potential-loss-weight', type=float, default=None,
+                        help='[OC] Weight for attractive + repulsive potential')
+    parser.add_argument('--beta-loss-weight', type=float, default=None,
+                        help='[OC] Weight for beta condensation+suppression')
+    parser.add_argument('--clustering-dim', type=int, default=None,
+                        help='[OC] Clustering space dimensionality')
+    # DETR head
     parser.add_argument('--num-encoder-layers', type=int, default=None,
-                        help='Number of compact token encoder layers')
+                        help='[DETR] Number of compact token encoder layers')
     parser.add_argument('--num-decoder-layers', type=int, default=None,
-                        help='Number of query decoder layers')
+                        help='[DETR] Number of query decoder layers')
     parser.add_argument('--num-queries', type=int, default=None,
-                        help='Number of learnable object queries')
-    parser.add_argument('--mask-ce-loss-weight', type=float, default=2.0,
-                        help='Weight for mask cross-entropy loss (default: 2.0)')
-    parser.add_argument('--confidence-loss-weight', type=float, default=2.0,
-                        help='Weight for confidence loss (default: 2.0)')
-    parser.add_argument('--denoising-loss-weight', type=float, default=1.0,
-                        help='Global scale for denoising losses relative to '
-                             'learnable losses (default: 1.0)')
-    parser.add_argument('--no-object-weight', type=float, default=0.1,
-                        help='Weight for no-object class in confidence loss '
-                             '(default: 0.1)')
+                        help='[DETR] Number of learnable object queries')
+    parser.add_argument('--mask-ce-loss-weight', type=float, default=None,
+                        help='[DETR] Weight for mask cross-entropy loss')
+    parser.add_argument('--confidence-loss-weight', type=float, default=None,
+                        help='[DETR] Weight for confidence loss')
+    parser.add_argument('--denoising-loss-weight', type=float, default=None,
+                        help='[DETR] Global scale for denoising losses')
+    parser.add_argument('--no-object-weight', type=float, default=None,
+                        help='[DETR] Weight for no-object class in confidence')
     parser.add_argument('--num-denoising-groups', type=int, default=None,
-                        help='Number of contrastive denoising groups '
-                             '(0 or None to disable)')
+                        help='[DETR] Number of denoising groups (0 to disable)')
     parser.add_argument('--denoising-noise-scale', type=float, default=None,
-                        help='Noise scale for contrastive denoising queries')
+                        help='[DETR] Noise scale for denoising queries')
     parser.add_argument('--save-every', type=int, default=10,
                         help='Save checkpoint every N epochs')
     parser.add_argument('--keep-best-k', type=int, default=5,
@@ -781,28 +771,36 @@ def main():
     )
 
     # ---- Model ----
-    network_module = load_network_module(args.network)
+    # Select network wrapper based on --oc flag (default: DETR)
+    if args.oc:
+        network_path = 'networks/lowpt_tau_TrackFinderOC.py'
+        logger.info('Head: Object Condensation (--oc)')
+    else:
+        network_path = args.network
+        logger.info(f'Head: DETR mask-denoising ({args.network})')
+    network_module = load_network_module(network_path)
+
     model_kwargs = {}
     if args.pretrained_backbone is not None:
         model_kwargs['pretrained_backbone_path'] = args.pretrained_backbone
-    if args.num_enrichment_layers is not None:
-        model_kwargs['num_enrichment_layers'] = args.num_enrichment_layers
-    if args.num_encoder_layers is not None:
-        model_kwargs['num_encoder_layers'] = args.num_encoder_layers
-    if args.num_decoder_layers is not None:
-        model_kwargs['num_decoder_layers'] = args.num_decoder_layers
 
-    # Mask-DETR loss weights and query configuration
-    if args.num_queries is not None:
-        model_kwargs['num_queries'] = args.num_queries
-    model_kwargs['mask_ce_loss_weight'] = args.mask_ce_loss_weight
-    model_kwargs['confidence_loss_weight'] = args.confidence_loss_weight
-    model_kwargs['denoising_loss_weight'] = args.denoising_loss_weight
-    model_kwargs['no_object_weight'] = args.no_object_weight
-    if args.num_denoising_groups is not None:
-        model_kwargs['num_denoising_groups'] = args.num_denoising_groups
-    if args.denoising_noise_scale is not None:
-        model_kwargs['denoising_noise_scale'] = args.denoising_noise_scale
+    # Pass only non-None head-specific args to the network wrapper.
+    # Each wrapper's get_model() pops what it needs and ignores the rest.
+    _head_arg_names = [
+        # backbone
+        'num_enrichment_layers',
+        # OC
+        'focal_bce_weight', 'potential_loss_weight', 'beta_loss_weight',
+        'clustering_dim',
+        # DETR
+        'num_encoder_layers', 'num_decoder_layers', 'num_queries',
+        'mask_ce_loss_weight', 'confidence_loss_weight', 'denoising_loss_weight',
+        'no_object_weight', 'num_denoising_groups', 'denoising_noise_scale',
+    ]
+    for arg_name in _head_arg_names:
+        value = getattr(args, arg_name, None)
+        if value is not None:
+            model_kwargs[arg_name] = value
 
     model, model_info = network_module.get_model(data_config, **model_kwargs)
     model = model.to(device)
@@ -817,12 +815,7 @@ def main():
         f'Frozen: {total_params - trainable_params:,}',
     )
     logger.info(f'Input names: {data_config.input_names}')
-    logger.info(
-        f'Loss weights: mask_ce={args.mask_ce_loss_weight}, '
-        f'confidence={args.confidence_loss_weight}, '
-        f'denoising={args.denoising_loss_weight}, '
-        f'no_object_weight={args.no_object_weight}',
-    )
+    logger.info(f'Head kwargs: {model_kwargs}')
 
     # Find input indices for pf_mask and pf_label
     input_names = list(data_config.input_names)
@@ -850,10 +843,9 @@ def main():
         _logging.getLogger('torch._dynamo').setLevel(_logging.WARNING)
 
         logger.info(
-            'Compiling model with torch.compile '
-            '(mode="max-autotune", dynamic=True)...',
+            'Compiling model with torch.compile (dynamic=True)...',
         )
-        model = torch.compile(model, dynamic=True)
+        model = torch.compile(model, dynamic=True, mode=None)
         logger.info('Model compiled.')
     else:
         logger.info('torch.compile disabled.')
@@ -919,7 +911,6 @@ def main():
     global_batch_count = 0
     loss_history = {
         'train': [], 'val': [], 'lr': [],
-        'mask_ce': [], 'confidence': [],
         'recall_at_10': [], 'recall_at_20': [], 'recall_at_30': [],
     }
 
@@ -956,11 +947,15 @@ def main():
             label_input_index=label_input_index,
             grad_clip_max_norm=args.grad_clip,
         )
+        train_components = ' | '.join(
+            f'{key.replace("_loss", "")}: {value:.5f}'
+            for key, value in train_losses.items()
+            if key != 'total_loss'
+        )
         logger.info(
             f'Epoch {epoch} train | '
             f'total: {train_losses["total_loss"]:.5f} | '
-            f'ce: {train_losses["mask_ce_loss"]:.5f} | '
-            f'conf: {train_losses["confidence_loss"]:.5f}',
+            f'{train_components}',
         )
 
         # Free training memory before validation to reduce peak usage.
@@ -1026,12 +1021,9 @@ def main():
         tensorboard_writer.add_scalar(
             'Loss/val_epoch', val_loss, epoch,
         )
-        tensorboard_writer.add_scalar(
-            'Loss/val_mask_ce', val_losses['mask_ce_loss'], epoch,
-        )
-        tensorboard_writer.add_scalar(
-            'Loss/val_confidence', val_losses['confidence_loss'], epoch,
-        )
+        for key, value in val_losses.items():
+            if key != 'total_loss':
+                tensorboard_writer.add_scalar(f'Loss/val_{key}', value, epoch)
         tensorboard_writer.add_scalar(
             'Metrics/recall_at_10', val_metrics['recall_at_10'], epoch,
         )
@@ -1043,12 +1035,17 @@ def main():
         )
         tensorboard_writer.add_scalar('LR/epoch', current_lr, epoch)
 
-        # Loss history
+        # Loss history (head-specific keys added dynamically)
         loss_history['train'].append(train_losses['total_loss'])
         loss_history['val'].append(val_loss)
         loss_history['lr'].append(current_lr)
-        loss_history['mask_ce'].append(val_losses['mask_ce_loss'])
-        loss_history['confidence'].append(val_losses['confidence_loss'])
+        for key, value in val_losses.items():
+            if key == 'total_loss':
+                continue
+            short_key = key.replace('_loss', '')
+            if short_key not in loss_history:
+                loss_history[short_key] = []
+            loss_history[short_key].append(value)
         loss_history['recall_at_10'].append(val_metrics['recall_at_10'])
         loss_history['recall_at_20'].append(val_metrics['recall_at_20'])
         loss_history['recall_at_30'].append(val_metrics['recall_at_30'])
@@ -1132,7 +1129,7 @@ def main():
         # Recompile if using torch.compile
         if use_compile:
             model = torch.compile(
-                original_model, mode='max-autotune', dynamic=True,
+                original_model, dynamic=True, mode=None,
             )
 
         finetune_start = args.epochs + 1
@@ -1153,11 +1150,15 @@ def main():
                 label_input_index=label_input_index,
                 grad_clip_max_norm=args.grad_clip,
             )
+            finetune_components = ' | '.join(
+                f'{key.replace("_loss", "")}: {value:.5f}'
+                for key, value in train_losses.items()
+                if key != 'total_loss'
+            )
             logger.info(
                 f'Epoch {epoch} train | '
                 f'total: {train_losses["total_loss"]:.5f} | '
-                f'ce: {train_losses["mask_ce_loss"]:.5f} | '
-                f'conf: {train_losses["confidence_loss"]:.5f}',
+                f'{finetune_components}',
             )
 
             # Free training memory before validation
@@ -1220,8 +1221,13 @@ def main():
             loss_history['train'].append(train_losses['total_loss'])
             loss_history['val'].append(val_loss)
             loss_history['lr'].append(current_lr)
-            loss_history['mask_ce'].append(val_losses['mask_ce_loss'])
-            loss_history['confidence'].append(val_losses['confidence_loss'])
+            for key, value in val_losses.items():
+                if key == 'total_loss':
+                    continue
+                short_key = key.replace('_loss', '')
+                if short_key not in loss_history:
+                    loss_history[short_key] = []
+                loss_history[short_key].append(value)
             loss_history['recall_at_10'].append(val_metrics['recall_at_10'])
             loss_history['recall_at_20'].append(val_metrics['recall_at_20'])
             loss_history['recall_at_30'].append(val_metrics['recall_at_30'])

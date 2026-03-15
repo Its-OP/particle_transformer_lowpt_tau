@@ -51,12 +51,11 @@ DEVICE="cuda:0"
 STEPS_PER_EPOCH=500
 NUM_WORKERS=4
 NO_COMPILE=false
-# Mask DETR loss weights
+# Default DETR loss weights (ignored when --oc is passed)
 MASK_CE_LOSS_WEIGHT=2.0
 CONFIDENCE_LOSS_WEIGHT=2.0
-DENOISING_LOSS_WEIGHT=1.0
+DENOISING_LOSS_WEIGHT=0.5
 NO_OBJECT_WEIGHT=0.4
-# DN-DETR denoising
 NUM_DENOISING_GROUPS=5
 DENOISING_NOISE_SCALE=0.5
 # Keep top K best checkpoints by val loss (0 = keep all, for CERN cluster runs)

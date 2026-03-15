@@ -24,9 +24,9 @@ def get_model(data_config, **kwargs):
         num_encoder_layers: Number of compact token encoder layers (default: 6).
         num_decoder_layers: Number of query decoder layers (default: 4).
         num_queries: Number of learned queries (default: 30).
-        dice_loss_weight: Weight for dice loss (default: 2.0).
-        focal_bce_loss_weight: Weight for focal BCE loss (default: 5.0).
+        mask_ce_loss_weight: Weight for cross-entropy mask loss (default: 2.0).
         confidence_loss_weight: Weight for confidence BCE loss (default: 2.0).
+        denoising_loss_weight: Global scale for denoising losses (default: 1.0).
         no_object_weight: Weight for empty targets in confidence BCE (default: 0.4).
         num_denoising_groups: DN-DETR denoising groups (default: 5).
         denoising_noise_scale: Gaussian noise scale for denoising (default: 0.5).
@@ -39,9 +39,9 @@ def get_model(data_config, **kwargs):
     num_queries = kwargs.pop('num_queries', 30)
 
     # Loss weights
-    dice_loss_weight = kwargs.pop('dice_loss_weight', 2.0)
-    focal_bce_loss_weight = kwargs.pop('focal_bce_loss_weight', 5.0)
+    mask_ce_loss_weight = kwargs.pop('mask_ce_loss_weight', 2.0)
     confidence_loss_weight = kwargs.pop('confidence_loss_weight', 2.0)
+    denoising_loss_weight = kwargs.pop('denoising_loss_weight', 1.0)
     no_object_weight = kwargs.pop('no_object_weight', 0.4)
 
     # DN-DETR denoising
@@ -86,9 +86,9 @@ def get_model(data_config, **kwargs):
     configuration = dict(
         backbone_kwargs=backbone_kwargs,
         decoder_kwargs=decoder_kwargs,
-        dice_loss_weight=dice_loss_weight,
-        focal_bce_loss_weight=focal_bce_loss_weight,
+        mask_ce_loss_weight=mask_ce_loss_weight,
         confidence_loss_weight=confidence_loss_weight,
+        denoising_loss_weight=denoising_loss_weight,
         no_object_weight=no_object_weight,
         num_denoising_groups=num_denoising_groups,
         denoising_noise_scale=denoising_noise_scale,

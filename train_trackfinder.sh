@@ -52,9 +52,9 @@ STEPS_PER_EPOCH=500
 NUM_WORKERS=4
 NO_COMPILE=false
 # Mask DETR loss weights
-DICE_LOSS_WEIGHT=2.0
-FOCAL_BCE_LOSS_WEIGHT=5.0
+MASK_CE_LOSS_WEIGHT=2.0
 CONFIDENCE_LOSS_WEIGHT=2.0
+DENOISING_LOSS_WEIGHT=1.0
 NO_OBJECT_WEIGHT=0.4
 # DN-DETR denoising
 NUM_DENOISING_GROUPS=5
@@ -105,9 +105,9 @@ TRAIN_CMD="${CONDA_INIT} && cd ${SCRIPT_DIR} && python train_trackfinder.py \
     --scheduler ${SCHEDULER} \
     --device ${DEVICE} \
     --num-workers ${NUM_WORKERS} \
-    --dice-loss-weight ${DICE_LOSS_WEIGHT} \
-    --focal-bce-loss-weight ${FOCAL_BCE_LOSS_WEIGHT} \
+    --mask-ce-loss-weight ${MASK_CE_LOSS_WEIGHT} \
     --confidence-loss-weight ${CONFIDENCE_LOSS_WEIGHT} \
+    --denoising-loss-weight ${DENOISING_LOSS_WEIGHT} \
     --no-object-weight ${NO_OBJECT_WEIGHT} \
     --num-denoising-groups ${NUM_DENOISING_GROUPS} \
     --denoising-noise-scale ${DENOISING_NOISE_SCALE} \
@@ -161,7 +161,7 @@ echo "Batch size: ${BATCH_SIZE}"
 echo "LR:         ${LEARNING_RATE}"
 echo "Scheduler:  ${SCHEDULER}"
 echo "Device:     ${DEVICE}"
-echo "Loss wts:   dice=${DICE_LOSS_WEIGHT}, bce=${FOCAL_BCE_LOSS_WEIGHT}, conf=${CONFIDENCE_LOSS_WEIGHT}, eos=${NO_OBJECT_WEIGHT}"
+echo "Loss wts:   mask_ce=${MASK_CE_LOSS_WEIGHT}, conf=${CONFIDENCE_LOSS_WEIGHT}, dn=${DENOISING_LOSS_WEIGHT}, eos=${NO_OBJECT_WEIGHT}"
 echo "Denoising:  groups=${NUM_DENOISING_GROUPS}, noise=${DENOISING_NOISE_SCALE}"
 echo "AMP:        enabled"
 if [ "$NO_COMPILE" = true ]; then

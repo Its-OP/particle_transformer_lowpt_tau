@@ -356,8 +356,7 @@ def train_one_epoch(
     model.train()
     loss_accumulators = {
         'total_loss': 0.0,
-        'mask_dice_loss': 0.0,
-        'mask_focal_bce_loss': 0.0,
+        'mask_ce_loss': 0.0,
         'confidence_loss': 0.0,
     }
     num_batches = 0
@@ -437,8 +436,8 @@ def train_one_epoch(
                 'Loss/train_batch', loss.item(), global_batch_count,
             )
             tensorboard_writer.add_scalar(
-                'Loss/mask_dice_batch',
-                loss_dict['mask_dice_loss'].item(),
+                'Loss/mask_ce_batch',
+                loss_dict['mask_ce_loss'].item(),
                 global_batch_count,
             )
             tensorboard_writer.add_scalar(
@@ -458,7 +457,7 @@ def train_one_epoch(
                 f'Epoch {epoch} | Batch {batch_index} | '
                 f'Loss: {loss.item():.5f} | '
                 f'Avg Loss: {avg_total:.5f} | '
-                f'Dice: {loss_dict["mask_dice_loss"].item():.5f} | '
+                f'CE: {loss_dict["mask_ce_loss"].item():.5f} | '
                 f'Conf: {loss_dict["confidence_loss"].item():.5f} | '
                 f'LR: {current_lr:.2e} | '
                 f'Time: {elapsed:.1f}s',
@@ -501,8 +500,7 @@ def validate(
     model.eval()
     loss_accumulators = {
         'total_loss': 0.0,
-        'mask_dice_loss': 0.0,
-        'mask_focal_bce_loss': 0.0,
+        'mask_ce_loss': 0.0,
         'confidence_loss': 0.0,
     }
     # Aggregate recall@K metrics across batches
@@ -643,12 +641,13 @@ def main():
                         help='Number of query decoder layers')
     parser.add_argument('--num-queries', type=int, default=None,
                         help='Number of learnable object queries')
-    parser.add_argument('--dice-loss-weight', type=float, default=5.0,
-                        help='Weight for mask dice loss (default: 5.0)')
-    parser.add_argument('--focal-bce-loss-weight', type=float, default=2.0,
-                        help='Weight for mask focal BCE loss (default: 2.0)')
-    parser.add_argument('--confidence-loss-weight', type=float, default=1.0,
-                        help='Weight for confidence loss (default: 1.0)')
+    parser.add_argument('--mask-ce-loss-weight', type=float, default=2.0,
+                        help='Weight for mask cross-entropy loss (default: 2.0)')
+    parser.add_argument('--confidence-loss-weight', type=float, default=2.0,
+                        help='Weight for confidence loss (default: 2.0)')
+    parser.add_argument('--denoising-loss-weight', type=float, default=1.0,
+                        help='Global scale for denoising losses relative to '
+                             'learnable losses (default: 1.0)')
     parser.add_argument('--no-object-weight', type=float, default=0.1,
                         help='Weight for no-object class in confidence loss '
                              '(default: 0.1)')
@@ -796,9 +795,9 @@ def main():
     # Mask-DETR loss weights and query configuration
     if args.num_queries is not None:
         model_kwargs['num_queries'] = args.num_queries
-    model_kwargs['dice_loss_weight'] = args.dice_loss_weight
-    model_kwargs['focal_bce_loss_weight'] = args.focal_bce_loss_weight
+    model_kwargs['mask_ce_loss_weight'] = args.mask_ce_loss_weight
     model_kwargs['confidence_loss_weight'] = args.confidence_loss_weight
+    model_kwargs['denoising_loss_weight'] = args.denoising_loss_weight
     model_kwargs['no_object_weight'] = args.no_object_weight
     if args.num_denoising_groups is not None:
         model_kwargs['num_denoising_groups'] = args.num_denoising_groups
@@ -819,9 +818,9 @@ def main():
     )
     logger.info(f'Input names: {data_config.input_names}')
     logger.info(
-        f'Loss weights: dice={args.dice_loss_weight}, '
-        f'focal_bce={args.focal_bce_loss_weight}, '
+        f'Loss weights: mask_ce={args.mask_ce_loss_weight}, '
         f'confidence={args.confidence_loss_weight}, '
+        f'denoising={args.denoising_loss_weight}, '
         f'no_object_weight={args.no_object_weight}',
     )
 
@@ -920,7 +919,7 @@ def main():
     global_batch_count = 0
     loss_history = {
         'train': [], 'val': [], 'lr': [],
-        'mask_dice': [], 'mask_focal_bce': [], 'confidence': [],
+        'mask_ce': [], 'confidence': [],
         'recall_at_10': [], 'recall_at_20': [], 'recall_at_30': [],
     }
 
@@ -960,7 +959,7 @@ def main():
         logger.info(
             f'Epoch {epoch} train | '
             f'total: {train_losses["total_loss"]:.5f} | '
-            f'dice: {train_losses["mask_dice_loss"]:.5f} | '
+            f'ce: {train_losses["mask_ce_loss"]:.5f} | '
             f'conf: {train_losses["confidence_loss"]:.5f}',
         )
 
@@ -1028,7 +1027,7 @@ def main():
             'Loss/val_epoch', val_loss, epoch,
         )
         tensorboard_writer.add_scalar(
-            'Loss/val_mask_dice', val_losses['mask_dice_loss'], epoch,
+            'Loss/val_mask_ce', val_losses['mask_ce_loss'], epoch,
         )
         tensorboard_writer.add_scalar(
             'Loss/val_confidence', val_losses['confidence_loss'], epoch,
@@ -1048,10 +1047,7 @@ def main():
         loss_history['train'].append(train_losses['total_loss'])
         loss_history['val'].append(val_loss)
         loss_history['lr'].append(current_lr)
-        loss_history['mask_dice'].append(val_losses['mask_dice_loss'])
-        loss_history['mask_focal_bce'].append(
-            val_losses['mask_focal_bce_loss'],
-        )
+        loss_history['mask_ce'].append(val_losses['mask_ce_loss'])
         loss_history['confidence'].append(val_losses['confidence_loss'])
         loss_history['recall_at_10'].append(val_metrics['recall_at_10'])
         loss_history['recall_at_20'].append(val_metrics['recall_at_20'])
@@ -1160,7 +1156,7 @@ def main():
             logger.info(
                 f'Epoch {epoch} train | '
                 f'total: {train_losses["total_loss"]:.5f} | '
-                f'dice: {train_losses["mask_dice_loss"]:.5f} | '
+                f'ce: {train_losses["mask_ce_loss"]:.5f} | '
                 f'conf: {train_losses["confidence_loss"]:.5f}',
             )
 
@@ -1224,10 +1220,7 @@ def main():
             loss_history['train'].append(train_losses['total_loss'])
             loss_history['val'].append(val_loss)
             loss_history['lr'].append(current_lr)
-            loss_history['mask_dice'].append(val_losses['mask_dice_loss'])
-            loss_history['mask_focal_bce'].append(
-                val_losses['mask_focal_bce_loss'],
-            )
+            loss_history['mask_ce'].append(val_losses['mask_ce_loss'])
             loss_history['confidence'].append(val_losses['confidence_loss'])
             loss_history['recall_at_10'].append(val_metrics['recall_at_10'])
             loss_history['recall_at_20'].append(val_metrics['recall_at_20'])

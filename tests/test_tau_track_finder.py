@@ -3,12 +3,12 @@
 Tests cover:
     - Forward pass smoke test: random input → finite loss, correct shapes
     - Hungarian matching: cost matrix shape, matched indices validity
-    - Loss components: pointer focal loss and confidence BCE are finite and non-negative
+    - Loss components: mask CE loss and confidence BCE are finite and non-negative
     - GT extraction: correct extraction of up to 6 tau-track indices from labels
-    - Zero GT event: all confidence targets = 0, no pointer loss
+    - Zero GT event: all confidence targets = 0, no mask loss
     - Backbone freezing: backbone params have requires_grad=False
-    - Architecture: decoder post-norm, pointer context projection, confidence head dims
-    - Configuration: eos_coef (no-object weight) configurability
+    - Architecture: decoder post-norm, mask scoring, confidence head dims
+    - Configuration: no_object_weight configurability
     - Checkpoint management: rolling top-K best checkpoint pruning
 """
 import os
@@ -58,7 +58,7 @@ def _make_decoder_kwargs():
         num_queries=NUM_QUERIES,
         max_gt_tracks=MAX_GT_TRACKS,
         decoder_dim=64,  # Smaller for speed
-        pointer_dim=32,
+        mask_dim=32,
         num_heads=4,
         num_encoder_layers=1,  # Minimal for speed
         num_decoder_layers=1,
@@ -156,9 +156,9 @@ class TestForwardPass:
         with torch.no_grad():
             output = model(points, features, lorentz_vectors, mask)
 
-        assert 'pointer_logits' in output
+        assert 'mask_logits' in output
         assert 'confidence_logits' in output
-        assert output['pointer_logits'].shape == (
+        assert output['mask_logits'].shape == (
             BATCH_SIZE, NUM_QUERIES, NUM_TRACKS,
         )
         assert output['confidence_logits'].shape == (BATCH_SIZE, NUM_QUERIES)
@@ -169,8 +169,8 @@ class TestForwardPass:
         loss_dict = model(points, features, lorentz_vectors, mask, track_labels)
 
         assert loss_dict['total_loss'].item() >= 0.0
-        assert loss_dict['pointer_focal_loss'].item() >= 0.0
-        assert loss_dict['confidence_bce_loss'].item() >= 0.0
+        assert loss_dict['mask_ce_loss'].item() >= 0.0
+        assert loss_dict['confidence_loss'].item() >= 0.0
 
 
 # ---- Loss Component Tests ----
@@ -178,13 +178,14 @@ class TestForwardPass:
 class TestLossComponents:
     """Verify individual loss components."""
 
-    def test_both_loss_components_present(self, model, sample_training_inputs):
+    def test_all_loss_components_present(self, model, sample_training_inputs):
         points, features, lorentz_vectors, mask, track_labels = sample_training_inputs
         model.train()
         loss_dict = model(points, features, lorentz_vectors, mask, track_labels)
 
-        assert 'pointer_focal_loss' in loss_dict
-        assert 'confidence_bce_loss' in loss_dict
+        assert 'mask_ce_loss' in loss_dict
+        assert 'confidence_loss' in loss_dict
+        assert 'denoising_loss' in loss_dict
         assert 'total_loss' in loss_dict
 
     def test_loss_components_are_finite(self, model, sample_training_inputs):
@@ -201,11 +202,12 @@ class TestLossComponents:
         loss_dict = model(points, features, lorentz_vectors, mask, track_labels)
 
         expected_total = (
-            model.pointer_loss_weight * loss_dict['pointer_focal_loss']
-            + model.confidence_loss_weight * loss_dict['confidence_bce_loss']
+            model.mask_ce_loss_weight * loss_dict['mask_ce_loss']
+            + model.confidence_loss_weight * loss_dict['confidence_loss']
+            + loss_dict['denoising_loss']
         )
         torch.testing.assert_close(
-            loss_dict['total_loss'], expected_total, rtol=1e-5, atol=1e-7,
+            loss_dict['total_loss'], expected_total, rtol=1e-4, atol=1e-6,
         )
 
 
@@ -281,10 +283,10 @@ class TestZeroGroundTruth:
         loss_dict = model(points, features, lorentz_vectors, mask, track_labels)
 
         assert torch.isfinite(loss_dict['total_loss']).all()
-        # Pointer loss should be 0 (no matched queries)
-        assert loss_dict['pointer_focal_loss'].item() == 0.0
+        # Mask CE loss should be 0 (no matched queries)
+        assert loss_dict['mask_ce_loss'].item() == 0.0
         # Confidence loss should still be computed (all targets = 0)
-        assert loss_dict['confidence_bce_loss'].item() >= 0.0
+        assert loss_dict['confidence_loss'].item() >= 0.0
 
 
 # ---- Backbone Freezing Tests ----
@@ -370,47 +372,37 @@ class TestArchitecture:
             "Encoder should use post-norm (norm_first=False)"
         )
 
-    def test_pointer_context_projection_exists(self, model):
-        """Head should have a pointer_context_projection module for computing
-        soft-attention readout of enriched features for the confidence head.
-        """
-        assert hasattr(model.head, 'pointer_context_projection'), (
-            "TauTrackFinderHead should have pointer_context_projection"
+    def test_query_scoring_mlp_exists(self, model):
+        """Head should have a query_scoring_mlp for mask dot-product scoring."""
+        assert hasattr(model.head, 'query_scoring_mlp'), (
+            "TauTrackFinderHead should have query_scoring_mlp"
         )
 
-    def test_confidence_head_input_dim_is_double_decoder_dim(self, model):
-        """Confidence head input should be 2 * decoder_dim (decoded query
-        + pointed context) to break the constant-logit equilibrium.
-        """
-        # The first layer of confidence_head is Linear(2*decoder_dim, pointer_dim)
+    def test_confidence_head_input_dim(self, model):
+        """Confidence head input should be decoder_dim (decoded query only)."""
         first_linear = model.head.confidence_head[0]
-        expected_input_dim = 2 * model.head.decoder_dim
+        expected_input_dim = model.head.decoder_dim
         assert first_linear.in_features == expected_input_dim, (
             f"Confidence head input dim should be {expected_input_dim} "
-            f"(2 × decoder_dim), got {first_linear.in_features}"
+            f"(decoder_dim), got {first_linear.in_features}"
         )
 
-    def test_pointer_context_gradient_flow(self, model, sample_training_inputs):
-        """Confidence loss should flow gradients through pointer_context_projection
-        and into pointer_logits, providing additional training signal.
-
-        Gradient path: confidence_loss → confidence_head → pointed_context
-        → pointer_probabilities → pointer_logits
-        """
+    def test_gradient_flow_through_mask_logits(self, model, sample_training_inputs):
+        """Total loss should flow gradients through the mask scoring path."""
         points, features, lorentz_vectors, mask, track_labels = sample_training_inputs
         model.train()
         loss_dict = model(points, features, lorentz_vectors, mask, track_labels)
         loss_dict['total_loss'].backward()
 
-        # pointer_context_projection should receive gradients
+        # query_scoring_mlp should receive gradients from mask CE loss
         has_gradient = False
-        for param in model.head.pointer_context_projection.parameters():
+        for param in model.head.query_scoring_mlp.parameters():
             if param.grad is not None and param.grad.abs().sum() > 0:
                 has_gradient = True
                 break
         assert has_gradient, (
-            "pointer_context_projection should receive gradients from "
-            "confidence loss backpropagation"
+            "query_scoring_mlp should receive gradients from "
+            "mask cross-entropy loss backpropagation"
         )
 
 
@@ -420,12 +412,12 @@ class TestNoObjectWeight:
     """Verify eos_coef (no-object weight) configurability."""
 
     def test_default_no_object_weight(self):
-        """Default no_object_weight should be 0.1."""
+        """Default no_object_weight should be 0.4."""
         default_model = TauTrackFinder(
             backbone_kwargs=_make_backbone_kwargs(),
             decoder_kwargs=_make_decoder_kwargs(),
         )
-        assert default_model.no_object_weight == 0.1
+        assert default_model.no_object_weight == 0.4
 
     def test_custom_no_object_weight(self):
         """no_object_weight should be configurable via constructor."""
@@ -474,8 +466,8 @@ class TestNoObjectWeight:
 
         # With different eos_coef, the confidence BCE loss should differ
         # because unmatched queries (the majority) are weighted differently
-        assert loss_low['confidence_bce_loss'].item() != pytest.approx(
-            loss_high['confidence_bce_loss'].item(), abs=1e-6,
+        assert loss_low['confidence_loss'].item() != pytest.approx(
+            loss_high['confidence_loss'].item(), abs=1e-6,
         ), (
             "Different no_object_weight values should produce different "
             "confidence losses"

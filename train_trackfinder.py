@@ -646,6 +646,17 @@ def main():
                         help='[DETR] Number of denoising groups (0 to disable)')
     parser.add_argument('--denoising-noise-scale', type=float, default=None,
                         help='[DETR] Noise scale for denoising queries')
+    parser.add_argument('--drop-path-rate', type=float, default=None,
+                        help='[DETR] Stochastic depth drop rate for decoder '
+                             'layers. Linearly increases from 0 (first layer) '
+                             'to this value (last layer). Regularizes deep '
+                             'decoders to prevent overfitting (default: 0.0, '
+                             'disabled)')
+    parser.add_argument('--label-smoothing', type=float, default=None,
+                        help='[DETR] Label smoothing for cross-entropy mask '
+                             'loss. Distributes probability mass uniformly to '
+                             'prevent overconfident logit growth (default in '
+                             'model: 0.1)')
     parser.add_argument('--save-every', type=int, default=10,
                         help='Save checkpoint every N epochs')
     parser.add_argument('--keep-best-k', type=int, default=5,
@@ -794,8 +805,10 @@ def main():
         'clustering_dim',
         # DETR
         'num_encoder_layers', 'num_decoder_layers', 'num_queries',
+        'drop_path_rate',
         'mask_ce_loss_weight', 'confidence_loss_weight', 'denoising_loss_weight',
         'no_object_weight', 'num_denoising_groups', 'denoising_noise_scale',
+        'label_smoothing',
     ]
     for arg_name in _head_arg_names:
         value = getattr(args, arg_name, None)
@@ -816,6 +829,28 @@ def main():
     )
     logger.info(f'Input names: {data_config.input_names}')
     logger.info(f'Head kwargs: {model_kwargs}')
+
+    # ---- Auto-scale learning rate based on model size ----
+    # Scaling law: LR ∝ 1/√(num_params)
+    # Implemented as: LR_scaled = LR_base × √(reference_params / trainable_params)
+    # Reference: Object Condensation head with ~67K trainable parameters,
+    # which trains stably at the base LR (default 5e-4).
+    reference_params = 67_000
+    if trainable_params > reference_params:
+        learning_rate_scale = (reference_params / trainable_params) ** 0.5
+        original_learning_rate = args.lr
+        args.lr = args.lr * learning_rate_scale
+        logger.info(
+            f'LR auto-scaled: {original_learning_rate:.2e} '
+            f'× {learning_rate_scale:.4f} = {args.lr:.2e} '
+            f'(based on {trainable_params:,} trainable params, '
+            f'reference={reference_params:,})',
+        )
+    else:
+        logger.info(
+            f'LR not scaled: {trainable_params:,} trainable params '
+            f'<= reference {reference_params:,}',
+        )
 
     # Find input indices for pf_mask and pf_label
     input_names = list(data_config.input_names)

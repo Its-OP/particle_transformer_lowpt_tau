@@ -24,12 +24,15 @@ def get_model(data_config, **kwargs):
         num_encoder_layers: Number of compact token encoder layers (default: 6).
         num_decoder_layers: Number of query decoder layers (default: 4).
         num_queries: Number of learned queries (default: 30).
+        drop_path_rate: Maximum stochastic depth drop probability for the
+            last decoder layer (default: 0.0, disabled).
         mask_ce_loss_weight: Weight for cross-entropy mask loss (default: 2.0).
         confidence_loss_weight: Weight for confidence BCE loss (default: 2.0).
         denoising_loss_weight: Global scale for denoising losses (default: 1.0).
         no_object_weight: Weight for empty targets in confidence BCE (default: 0.4).
         num_denoising_groups: DN-DETR denoising groups (default: 5).
         denoising_noise_scale: Gaussian noise scale for denoising (default: 0.5).
+        label_smoothing: Label smoothing for cross-entropy mask loss (default: 0.1).
     """
     pretrained_backbone_path = kwargs.pop('pretrained_backbone_path', None)
     backbone_frozen = kwargs.pop('backbone_frozen', True)
@@ -37,6 +40,7 @@ def get_model(data_config, **kwargs):
     num_encoder_layers = kwargs.pop('num_encoder_layers', 6)
     num_decoder_layers = kwargs.pop('num_decoder_layers', 4)
     num_queries = kwargs.pop('num_queries', 30)
+    drop_path_rate = kwargs.pop('drop_path_rate', 0.0)
 
     # Loss weights
     mask_ce_loss_weight = kwargs.pop('mask_ce_loss_weight', 2.0)
@@ -47,6 +51,9 @@ def get_model(data_config, **kwargs):
     # DN-DETR denoising
     num_denoising_groups = kwargs.pop('num_denoising_groups', 5)
     denoising_noise_scale = kwargs.pop('denoising_noise_scale', 0.5)
+
+    # Label smoothing for cross-entropy mask loss
+    label_smoothing = kwargs.pop('label_smoothing', 0.1)
 
     input_dim = len(data_config.input_dicts['pf_features'])
 
@@ -81,6 +88,7 @@ def get_model(data_config, **kwargs):
         num_encoder_layers=num_encoder_layers,
         num_decoder_layers=num_decoder_layers,
         dropout=0.1,
+        drop_path_rate=drop_path_rate,
     )
 
     configuration = dict(
@@ -92,6 +100,7 @@ def get_model(data_config, **kwargs):
         no_object_weight=no_object_weight,
         num_denoising_groups=num_denoising_groups,
         denoising_noise_scale=denoising_noise_scale,
+        label_smoothing=label_smoothing,
     )
     configuration.update(**kwargs)
     _logger.info('Model config: %s' % str(configuration))

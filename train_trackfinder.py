@@ -274,7 +274,7 @@ def train_one_epoch(
     model.train()
     loss_accumulators = {
         'total_loss': 0.0,
-        'pointer_focal_loss': 0.0,
+        'pointer_ce_loss': 0.0,
         'confidence_bce_loss': 0.0,
     }
     num_batches = 0
@@ -354,8 +354,8 @@ def train_one_epoch(
                 'Loss/train_batch', loss.item(), global_batch_count,
             )
             tensorboard_writer.add_scalar(
-                'Loss/pointer_focal_batch',
-                loss_dict['pointer_focal_loss'].item(),
+                'Loss/pointer_ce_batch',
+                loss_dict['pointer_ce_loss'].item(),
                 global_batch_count,
             )
             tensorboard_writer.add_scalar(
@@ -375,7 +375,7 @@ def train_one_epoch(
                 f'Epoch {epoch} | Batch {batch_index} | '
                 f'Loss: {loss.item():.5f} | '
                 f'Avg Loss: {avg_total:.5f} | '
-                f'Ptr: {loss_dict["pointer_focal_loss"].item():.5f} | '
+                f'Ptr: {loss_dict["pointer_ce_loss"].item():.5f} | '
                 f'Conf: {loss_dict["confidence_bce_loss"].item():.5f} | '
                 f'LR: {current_lr:.2e} | '
                 f'Time: {elapsed:.1f}s',
@@ -418,7 +418,7 @@ def validate(
     model.eval()
     loss_accumulators = {
         'total_loss': 0.0,
-        'pointer_focal_loss': 0.0,
+        'pointer_ce_loss': 0.0,
         'confidence_bce_loss': 0.0,
     }
     # Aggregate metrics across batches
@@ -779,7 +779,7 @@ def main():
     global_batch_count = 0
     loss_history = {
         'train': [], 'val': [], 'lr': [],
-        'pointer_focal': [], 'confidence_bce': [],
+        'pointer_ce': [], 'confidence_bce': [],
         'track_finding_efficiency': [], 'fake_rate': [],
     }
 
@@ -819,7 +819,7 @@ def main():
         logger.info(
             f'Epoch {epoch} train | '
             f'total: {train_losses["total_loss"]:.5f} | '
-            f'ptr: {train_losses["pointer_focal_loss"]:.5f} | '
+            f'ptr: {train_losses["pointer_ce_loss"]:.5f} | '
             f'conf: {train_losses["confidence_bce_loss"]:.5f}',
         )
 
@@ -885,7 +885,7 @@ def main():
             'Loss/val_epoch', val_loss, epoch,
         )
         tensorboard_writer.add_scalar(
-            'Loss/val_pointer_focal', val_losses['pointer_focal_loss'], epoch,
+            'Loss/val_pointer_ce', val_losses['pointer_ce_loss'], epoch,
         )
         tensorboard_writer.add_scalar(
             'Loss/val_confidence_bce', val_losses['confidence_bce_loss'], epoch,
@@ -903,8 +903,8 @@ def main():
         loss_history['train'].append(train_losses['total_loss'])
         loss_history['val'].append(val_loss)
         loss_history['lr'].append(current_lr)
-        loss_history['pointer_focal'].append(
-            val_losses['pointer_focal_loss'],
+        loss_history['pointer_ce'].append(
+            val_losses['pointer_ce_loss'],
         )
         loss_history['confidence_bce'].append(
             val_losses['confidence_bce_loss'],
@@ -1024,7 +1024,7 @@ def main():
             logger.info(
                 f'Epoch {epoch} train | '
                 f'total: {train_losses["total_loss"]:.5f} | '
-                f'ptr: {train_losses["pointer_focal_loss"]:.5f} | '
+                f'ptr: {train_losses["pointer_ce_loss"]:.5f} | '
                 f'conf: {train_losses["confidence_bce_loss"]:.5f}',
             )
 
@@ -1082,8 +1082,8 @@ def main():
             loss_history['train'].append(train_losses['total_loss'])
             loss_history['val'].append(val_loss)
             loss_history['lr'].append(current_lr)
-            loss_history['pointer_focal'].append(
-                val_losses['pointer_focal_loss'],
+            loss_history['pointer_ce'].append(
+                val_losses['pointer_ce_loss'],
             )
             loss_history['confidence_bce'].append(
                 val_losses['confidence_bce_loss'],

@@ -859,7 +859,7 @@ def main():
             'Compiling model with torch.compile '
             '(mode="max-autotune", dynamic=True)...',
         )
-        model = torch.compile(model, mode='max-autotune', dynamic=True)
+        model = torch.compile(model, dynamic=True)
         logger.info('Model compiled.')
     else:
         logger.info('torch.compile disabled.')

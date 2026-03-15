@@ -162,7 +162,7 @@ echo "AMP:        enabled"
 if [ "$NO_COMPILE" = true ]; then
     echo "Compile:    disabled"
 else
-    echo "Compile:    enabled (max-autotune)"
+    echo "Compile:    enabled"
 fi
 if [ -n "$PRETRAINED_BACKBONE" ]; then
     echo "Backbone:   ${PRETRAINED_BACKBONE}"

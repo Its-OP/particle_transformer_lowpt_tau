@@ -35,8 +35,8 @@ CONDA_ENV_NAME="part"
 # Default training arguments (can be overridden via command-line)
 DATA_CONFIG="data/low-pt/lowpt_tau_trackfinder.yaml"
 DATA_DIR="data/low-pt/"
-NETWORK="networks/lowpt_tau_TrackFinder.py"
-MODEL_NAME="TrackFinderV2"
+NETWORK="networks/lowpt_tau_TrackFinderV2.py"
+MODEL_NAME="TrackFinderV3"
 EXPERIMENTS_DIR="experiments"
 PRETRAINED_BACKBONE="models/backbone_best.pt"
 EPOCHS=50
@@ -48,7 +48,7 @@ DEVICE="cuda:0"
 STEPS_PER_EPOCH=500
 NUM_WORKERS=4
 NO_COMPILE=false
-# DETR loss weights (ignored when --oc is passed)
+# DETR loss weights (only used with DETR head; ignored by V2 and OC wrappers)
 MASK_CE_LOSS_WEIGHT=2.0
 CONFIDENCE_LOSS_WEIGHT=2.0
 NO_OBJECT_WEIGHT=0.4
@@ -151,7 +151,7 @@ echo "Batch size: ${BATCH_SIZE}"
 echo "LR:         ${LEARNING_RATE}"
 echo "Scheduler:  ${SCHEDULER}"
 echo "Device:     ${DEVICE}"
-echo "Loss wts:   mask_ce=${MASK_CE_LOSS_WEIGHT}, conf=${CONFIDENCE_LOSS_WEIGHT}, eos=${NO_OBJECT_WEIGHT}"
+echo "Network:    ${NETWORK}"
 echo "AMP:        enabled"
 if [ "$NO_COMPILE" = true ]; then
     echo "Compile:    disabled"

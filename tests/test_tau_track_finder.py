@@ -184,7 +184,7 @@ class TestLossComponents:
 
         assert 'mask_ce_loss' in loss_dict
         assert 'confidence_loss' in loss_dict
-        # No denoising in simplified model
+        assert 'per_track_loss' in loss_dict
         assert 'total_loss' in loss_dict
 
     def test_loss_components_are_finite(self, model, sample_training_inputs):
@@ -203,6 +203,7 @@ class TestLossComponents:
         expected_total = (
             model.mask_ce_loss_weight * loss_dict['mask_ce_loss']
             + model.confidence_loss_weight * loss_dict['confidence_loss']
+            + model.per_track_loss_weight * loss_dict['per_track_loss']
         )
         torch.testing.assert_close(
             loss_dict['total_loss'], expected_total, rtol=1e-4, atol=1e-6,

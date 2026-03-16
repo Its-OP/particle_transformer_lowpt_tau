@@ -229,9 +229,10 @@ def extract_label_from_inputs(
 def extract_per_track_scores(output_dict: dict[str, torch.Tensor]) -> torch.Tensor:
     """Extract per-track ranking scores from any head's inference output.
 
-    Supports both OC and DETR heads:
-        - OC: output_dict['beta_scores'] → (B, P) direct per-track scores
-        - DETR: output_dict['mask_logits'] → (B, Q, P) → max over queries → (B, P)
+    Supports all heads:
+        - DETR hybrid: output_dict['per_track_logits'] → (B, P) direct scores
+        - OC: output_dict['beta_scores'] → (B, P) direct scores
+        - DETR query-only: output_dict['mask_logits'] → max over queries → (B, P)
 
     Args:
         output_dict: Model inference output dict.
@@ -239,15 +240,17 @@ def extract_per_track_scores(output_dict: dict[str, torch.Tensor]) -> torch.Tens
     Returns:
         per_track_scores: (B, P) scores for ranking tracks (higher = more likely tau).
     """
-    if 'beta_scores' in output_dict:
+    if 'per_track_logits' in output_dict:
+        # Hybrid DETR: per-track head provides direct tau scores
+        return output_dict['per_track_logits']
+    elif 'beta_scores' in output_dict:
         return output_dict['beta_scores']
     elif 'mask_logits' in output_dict:
         return output_dict['mask_logits'].max(dim=1).values
     else:
         raise KeyError(
             f'Cannot extract per-track scores from output keys: '
-            f'{list(output_dict.keys())}. Expected "beta_scores" (OC) '
-            f'or "mask_logits" (DETR).',
+            f'{list(output_dict.keys())}.',
         )
 
 
@@ -638,6 +641,8 @@ def main():
                         help='[DETR] Weight for confidence loss')
     parser.add_argument('--no-object-weight', type=float, default=None,
                         help='[DETR] Weight for no-object class in confidence')
+    parser.add_argument('--per-track-loss-weight', type=float, default=None,
+                        help='[DETR] Weight for per-track focal BCE auxiliary loss')
     parser.add_argument('--save-every', type=int, default=10,
                         help='Save checkpoint every N epochs')
     parser.add_argument('--keep-best-k', type=int, default=5,
@@ -787,7 +792,7 @@ def main():
         # DETR
         'num_decoder_layers', 'num_queries',
         'mask_ce_loss_weight', 'confidence_loss_weight',
-        'no_object_weight',
+        'per_track_loss_weight', 'no_object_weight',
     ]
     for arg_name in _head_arg_names:
         value = getattr(args, arg_name, None)
@@ -808,28 +813,6 @@ def main():
     )
     logger.info(f'Input names: {data_config.input_names}')
     logger.info(f'Head kwargs: {model_kwargs}')
-
-    # ---- Auto-scale learning rate based on model size ----
-    # Scaling law: LR ∝ 1/√(num_params)
-    # Implemented as: LR_scaled = LR_base × √(reference_params / trainable_params)
-    # Reference: Object Condensation head with ~67K trainable parameters,
-    # which trains stably at the base LR (default 5e-4).
-    reference_params = 67_000
-    if trainable_params > reference_params:
-        learning_rate_scale = (reference_params / trainable_params) ** 0.5
-        original_learning_rate = args.lr
-        args.lr = args.lr * learning_rate_scale
-        logger.info(
-            f'LR auto-scaled: {original_learning_rate:.2e} '
-            f'× {learning_rate_scale:.4f} = {args.lr:.2e} '
-            f'(based on {trainable_params:,} trainable params, '
-            f'reference={reference_params:,})',
-        )
-    else:
-        logger.info(
-            f'LR not scaled: {trainable_params:,} trainable params '
-            f'<= reference {reference_params:,}',
-        )
 
     # Find input indices for pf_mask and pf_label
     input_names = list(data_config.input_names)

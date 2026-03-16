@@ -31,6 +31,7 @@ def get_model(data_config, **kwargs):
     # Loss weights
     mask_ce_loss_weight = kwargs.pop('mask_ce_loss_weight', 2.0)
     confidence_loss_weight = kwargs.pop('confidence_loss_weight', 2.0)
+    per_track_loss_weight = kwargs.pop('per_track_loss_weight', 1.0)
     no_object_weight = kwargs.pop('no_object_weight', 0.4)
 
     input_dim = len(data_config.input_dicts['pf_features'])
@@ -72,6 +73,7 @@ def get_model(data_config, **kwargs):
         decoder_kwargs=decoder_kwargs,
         mask_ce_loss_weight=mask_ce_loss_weight,
         confidence_loss_weight=confidence_loss_weight,
+        per_track_loss_weight=per_track_loss_weight,
         no_object_weight=no_object_weight,
     )
     configuration.update(**kwargs)

@@ -19,7 +19,6 @@ def get_model(data_config, **kwargs):
 
     Kwargs consumed (popped from kwargs):
         pretrained_backbone_path: Path to pretrained backbone checkpoint.
-        backbone_frozen: Whether to freeze backbone (default: True).
         num_enrichment_layers: Number of enrichment layers (default: 5).
         potential_loss_weight: Weight for attractive + repulsive loss (default: 1.0).
         beta_loss_weight: Weight for beta loss (default: 1.0).
@@ -28,7 +27,6 @@ def get_model(data_config, **kwargs):
         clustering_dim: Clustering space dimensionality (default: 8).
     """
     pretrained_backbone_path = kwargs.pop('pretrained_backbone_path', None)
-    backbone_frozen = kwargs.pop('backbone_frozen', True)
     num_enrichment_layers = kwargs.pop('num_enrichment_layers', 5)
 
     # OC-specific hyperparameters
@@ -111,15 +109,10 @@ def get_model(data_config, **kwargs):
         model.backbone.load_state_dict(backbone_state)
         _logger.info('Pretrained backbone loaded successfully.')
 
-    # Freeze/unfreeze backbone
-    if backbone_frozen:
-        for parameter in model.backbone.parameters():
-            parameter.requires_grad = False
-        _logger.info('Backbone frozen (no gradients).')
-    else:
-        for parameter in model.backbone.parameters():
-            parameter.requires_grad = True
-        _logger.info('Backbone unfrozen (end-to-end training).')
+    # Freeze backbone
+    for parameter in model.backbone.parameters():
+        parameter.requires_grad = False
+    _logger.info('Backbone frozen (no gradients).')
 
     model_info = {
         'input_names': list(data_config.input_names),

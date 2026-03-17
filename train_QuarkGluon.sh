@@ -19,17 +19,9 @@ extraopts=""
 if [[ "$model" == "ParT" ]]; then
     modelopts="networks/example_ParticleTransformer.py --use-amp --optimizer-option weight_decay 0.01"
     lr="1e-3"
-elif [[ "$model" == "ParT-FineTune" ]]; then
-    modelopts="networks/example_ParticleTransformer_finetune.py --use-amp --optimizer-option weight_decay 0.01"
-    lr="1e-4"
-    extraopts="--optimizer-option lr_mult (\"fc.*\",50) --lr-scheduler none"
 elif [[ "$model" == "PN" ]]; then
     modelopts="networks/example_ParticleNet.py"
     lr="1e-2"
-elif [[ "$model" == "PN-FineTune" ]]; then
-    modelopts="networks/example_ParticleNet_finetune.py"
-    lr="1e-3"
-    extraopts="--optimizer-option lr_mult (\"fc_out.*\",50) --lr-scheduler none"
 elif [[ "$model" == "PFN" ]]; then
     modelopts="networks/example_PFN.py"
     lr="2e-2"
@@ -54,13 +46,6 @@ elif [[ "${FEATURE_TYPE}" =~ ^(kinpid|kinpidplus)$ ]]; then
 else
     echo "Invalid feature type ${FEATURE_TYPE}!"
     exit 1
-fi
-
-if [[ "$model" == "ParT-FineTune" ]]; then
-    modelopts+=" --load-model-weights models/ParT_${pretrain_type}.pt"
-fi
-if [[ "$model" == "PN-FineTune" ]]; then
-    modelopts+=" --load-model-weights models/ParticleNet_${pretrain_type}.pt"
 fi
 
 weaver \

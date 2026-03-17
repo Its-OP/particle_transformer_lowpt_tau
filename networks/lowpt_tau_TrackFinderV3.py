@@ -20,11 +20,9 @@ def get_model(data_config, **kwargs):
 
     Kwargs consumed (popped from kwargs):
         pretrained_backbone_path: Path to pretrained backbone checkpoint.
-        backbone_frozen: Whether to freeze backbone (default: True).
         num_enrichment_layers: Number of enrichment layers (default: 5).
     """
     pretrained_backbone_path = kwargs.pop('pretrained_backbone_path', None)
-    backbone_frozen = kwargs.pop('backbone_frozen', True)
     backbone_mode = kwargs.pop('backbone_mode', 'parallel')
     num_enrichment_layers = kwargs.pop('num_enrichment_layers', 5)
 
@@ -92,9 +90,13 @@ def get_model(data_config, **kwargs):
         global_context_dim=32,
         # Scoring head
         scoring_dropout=0.4,
-        # Focal loss
-        focal_alpha=0.75,
-        focal_gamma=2.0,
+        # ASL loss (Ben-Baruch et al., ICCV 2021)
+        focal_gamma_positive=1.0,
+        focal_gamma_negative=4.0,
+        asl_clip=0.05,
+        # Ranking loss
+        ranking_loss_weight=0.1,
+        ranking_num_samples=10,
     )
     configuration.update(**kwargs)
     _logger.info('Backbone mode: %s', backbone_mode)
@@ -129,16 +131,11 @@ def get_model(data_config, **kwargs):
         model.backbone.load_state_dict(backbone_state)
         _logger.info('Pretrained backbone loaded successfully.')
 
-    # Freeze/unfreeze backbone (frozen mode only — parallel is always trainable)
+    # Freeze backbone (frozen mode only — parallel is always trainable)
     if backbone_mode == 'frozen':
-        if backbone_frozen:
-            for parameter in model.backbone.parameters():
-                parameter.requires_grad = False
-            _logger.info('Backbone frozen (no gradients).')
-        else:
-            for parameter in model.backbone.parameters():
-                parameter.requires_grad = True
-            _logger.info('Backbone unfrozen (end-to-end training).')
+        for parameter in model.backbone.parameters():
+            parameter.requires_grad = False
+        _logger.info('Backbone frozen (no gradients).')
     else:
         _logger.info('Parallel backbone: fully trainable, no pretrained weights.')
 

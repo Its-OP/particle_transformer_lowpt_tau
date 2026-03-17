@@ -40,7 +40,6 @@ MODEL_NAME="TrackFinderV3"
 EXPERIMENTS_DIR="experiments"
 PRETRAINED_BACKBONE="models/backbone_best.pt"
 EPOCHS=50
-FINETUNE_EPOCHS=0
 BATCH_SIZE=96
 LEARNING_RATE=1e-4
 SCHEDULER="cosine"
@@ -109,11 +108,6 @@ if [ -n "$PRETRAINED_BACKBONE" ]; then
     TRAIN_CMD="${TRAIN_CMD} --pretrained-backbone ${PRETRAINED_BACKBONE}"
 fi
 
-# Add fine-tuning epochs if specified
-if [ "$FINETUNE_EPOCHS" -gt 0 ]; then
-    TRAIN_CMD="${TRAIN_CMD} --finetune-epochs ${FINETUNE_EPOCHS}"
-fi
-
 # Disable torch.compile if requested
 if [ "$NO_COMPILE" = true ]; then
     TRAIN_CMD="${TRAIN_CMD} --no-compile"
@@ -145,7 +139,7 @@ echo ""
 echo "Session:    ${SESSION_TRAIN} (training)"
 echo "            ${SESSION_GPU} (GPU monitor)"
 echo "Experiments: ${SCRIPT_DIR}/${EXPERIMENTS_DIR}/"
-echo "Epochs:     ${EPOCHS} (frozen) + ${FINETUNE_EPOCHS} (finetune)"
+echo "Epochs:     ${EPOCHS}"
 echo "Steps/epoch: ${STEPS_PER_EPOCH}"
 echo "Batch size: ${BATCH_SIZE}"
 echo "LR:         ${LEARNING_RATE}"

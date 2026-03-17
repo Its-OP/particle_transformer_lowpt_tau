@@ -20,6 +20,7 @@ from weaver.nn.model.TauTrackFinderV3 import (
     GAPLayer,
     TauTrackFinderV3,
 )
+from weaver.nn.model.ParallelBackbone import ParallelBackbone
 
 
 # ---- Shared test configuration ----
@@ -723,3 +724,209 @@ class TestV3MultiScaleConcatenation:
             altered_output['per_track_logits'][valid_mask],
             atol=1e-3,
         ), 'Zeroing raw features should change the model output'
+
+
+# ---- ParallelBackbone Tests ----
+
+IDENTITY_DIM = 32
+CONTEXT_DIM = 64
+
+
+def _make_parallel_backbone_kwargs():
+    """Build ParallelBackbone kwargs for testing (small dims)."""
+    return dict(
+        input_dim=INPUT_DIM,
+        identity_dim=IDENTITY_DIM,
+        context_dim=CONTEXT_DIM,
+        num_context_layers=2,
+        context_num_neighbors=8,
+    )
+
+
+@pytest.fixture
+def parallel_backbone():
+    """Create a ParallelBackbone for testing."""
+    return ParallelBackbone(**_make_parallel_backbone_kwargs())
+
+
+@pytest.fixture
+def parallel_model():
+    """Create a TauTrackFinderV3 with parallel backbone for testing."""
+    return TauTrackFinderV3(
+        backbone_mode='parallel',
+        parallel_backbone_kwargs=_make_parallel_backbone_kwargs(),
+        **_make_v3_kwargs(),
+    )
+
+
+class TestParallelBackbone:
+    """Test the parallel identity + context backbone."""
+
+    def test_output_shape(self, parallel_backbone):
+        """Output should be (B, identity_dim + context_dim, P)."""
+        points, features, lorentz_vectors = _make_physical_inputs(
+            BATCH_SIZE, NUM_TRACKS,
+        )
+        mask = torch.ones(BATCH_SIZE, 1, NUM_TRACKS)
+
+        output = parallel_backbone(points, features, lorentz_vectors, mask)
+
+        expected_dim = IDENTITY_DIM + CONTEXT_DIM
+        assert output.shape == (BATCH_SIZE, expected_dim, NUM_TRACKS), (
+            f'Expected shape ({BATCH_SIZE}, {expected_dim}, {NUM_TRACKS}), '
+            f'got {output.shape}'
+        )
+
+    def test_identity_preserves_features(self, parallel_backbone):
+        """Identity stream output should differ when raw features differ,
+        even if neighbor features are identical."""
+        points, features, lorentz_vectors = _make_physical_inputs(
+            BATCH_SIZE, NUM_TRACKS,
+        )
+        mask = torch.ones(BATCH_SIZE, 1, NUM_TRACKS)
+
+        output_1 = parallel_backbone(points, features, lorentz_vectors, mask)
+
+        # Change a single track's features
+        features_modified = features.clone()
+        features_modified[:, :, 5] += 10.0
+        output_2 = parallel_backbone(
+            points, features_modified, lorentz_vectors, mask,
+        )
+
+        # The identity stream for track 5 should change
+        # (first IDENTITY_DIM channels are identity)
+        identity_1 = output_1[:, :IDENTITY_DIM, 5]
+        identity_2 = output_2[:, :IDENTITY_DIM, 5]
+        assert not torch.allclose(identity_1, identity_2, atol=1e-5), (
+            'Identity stream should change when track features change'
+        )
+
+    def test_context_uses_neighbors(self, parallel_backbone):
+        """Context stream should change when neighbor features change."""
+        points, features, lorentz_vectors = _make_physical_inputs(
+            BATCH_SIZE, NUM_TRACKS,
+        )
+        mask = torch.ones(BATCH_SIZE, 1, NUM_TRACKS)
+
+        output_1 = parallel_backbone(points, features, lorentz_vectors, mask)
+
+        # Change features of many tracks (neighbors of track 5)
+        features_modified = features.clone()
+        features_modified[:, :, :20] += 10.0
+        output_2 = parallel_backbone(
+            points, features_modified, lorentz_vectors, mask,
+        )
+
+        # Context stream for track 50 (far from modified) should also
+        # potentially change since it may share neighbors
+        context_1 = output_1[:, IDENTITY_DIM:, :]
+        context_2 = output_2[:, IDENTITY_DIM:, :]
+        assert not torch.allclose(context_1, context_2, atol=1e-3), (
+            'Context stream should change when neighbor features change'
+        )
+
+    def test_all_parameters_trainable(self, parallel_backbone):
+        """All ParallelBackbone parameters should require gradients."""
+        for name, parameter in parallel_backbone.named_parameters():
+            assert parameter.requires_grad, (
+                f"ParallelBackbone param '{name}' has requires_grad=False"
+            )
+
+    def test_padded_output_is_zero(self, parallel_backbone):
+        """Padded track positions should produce zero output."""
+        points, features, lorentz_vectors = _make_physical_inputs(
+            BATCH_SIZE, NUM_TRACKS,
+        )
+        mask = torch.ones(BATCH_SIZE, 1, NUM_TRACKS)
+        mask[:, :, -50:] = 0.0
+
+        output = parallel_backbone(points, features, lorentz_vectors, mask)
+
+        padded_output = output[:, :, -50:]
+        assert torch.all(padded_output == 0), (
+            'Padded positions should have zero output'
+        )
+
+    def test_gradients_flow_through_both_streams(self, parallel_backbone):
+        """Backward should produce gradients in both identity and context."""
+        points, features, lorentz_vectors = _make_physical_inputs(
+            BATCH_SIZE, NUM_TRACKS,
+        )
+        mask = torch.ones(BATCH_SIZE, 1, NUM_TRACKS)
+
+        output = parallel_backbone(points, features, lorentz_vectors, mask)
+        loss = output.sum()
+        loss.backward()
+
+        identity_has_grad = False
+        context_has_grad = False
+        for name, parameter in parallel_backbone.named_parameters():
+            if parameter.grad is not None and parameter.grad.abs().sum() > 0:
+                if 'identity' in name:
+                    identity_has_grad = True
+                if 'context' in name:
+                    context_has_grad = True
+
+        assert identity_has_grad, 'Identity stream received no gradients'
+        assert context_has_grad, 'Context stream received no gradients'
+
+
+class TestV3ParallelMode:
+    """Test V3 model with backbone_mode='parallel'."""
+
+    def test_training_returns_finite_loss(
+        self, parallel_model, sample_training_inputs,
+    ):
+        points, features, lorentz_vectors, mask, track_labels = (
+            sample_training_inputs
+        )
+        parallel_model.train()
+        loss_dict = parallel_model(
+            points, features, lorentz_vectors, mask, track_labels,
+        )
+
+        assert 'total_loss' in loss_dict
+        assert torch.isfinite(loss_dict['total_loss']).all()
+
+    def test_inference_returns_per_track_logits(
+        self, parallel_model, sample_training_inputs,
+    ):
+        points, features, lorentz_vectors, mask, _ = sample_training_inputs
+        parallel_model.eval()
+        with torch.no_grad():
+            output = parallel_model(points, features, lorentz_vectors, mask)
+
+        assert 'per_track_logits' in output
+        assert output['per_track_logits'].shape == (BATCH_SIZE, NUM_TRACKS)
+
+    def test_no_frozen_backbone(self, parallel_model):
+        """Parallel mode should not have a frozen EnrichCompactBackbone."""
+        # All parameters should be trainable (no frozen backbone)
+        frozen_params = sum(
+            1 for _, parameter in parallel_model.named_parameters()
+            if not parameter.requires_grad
+        )
+        assert frozen_params == 0, (
+            f'Parallel mode should have 0 frozen params, found {frozen_params}'
+        )
+
+    def test_gradients_after_backward(
+        self, parallel_model, sample_training_inputs,
+    ):
+        points, features, lorentz_vectors, mask, track_labels = (
+            sample_training_inputs
+        )
+        parallel_model.train()
+        loss_dict = parallel_model(
+            points, features, lorentz_vectors, mask, track_labels,
+        )
+        loss_dict['total_loss'].backward()
+
+        params_with_grad = sum(
+            1 for _, parameter in parallel_model.named_parameters()
+            if parameter.grad is not None and parameter.grad.abs().sum() > 0
+        )
+        assert params_with_grad > 0, (
+            'No parameters received gradients in parallel mode'
+        )

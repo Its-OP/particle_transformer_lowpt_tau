@@ -25,6 +25,7 @@ def get_model(data_config, **kwargs):
     """
     pretrained_backbone_path = kwargs.pop('pretrained_backbone_path', None)
     backbone_frozen = kwargs.pop('backbone_frozen', True)
+    backbone_mode = kwargs.pop('backbone_mode', 'parallel')
     num_enrichment_layers = kwargs.pop('num_enrichment_layers', 5)
 
     # Pop args from other head types (unused by V3, may be passed generically)
@@ -39,10 +40,9 @@ def get_model(data_config, **kwargs):
 
     input_dim = len(data_config.input_dicts['pf_features'])
 
-    # Backbone config: identical to pretraining
+    # Frozen backbone config (used when backbone_mode='frozen')
     single_layer_params = (32, 256, [(8, 1), (4, 1), (2, 1), (1, 1)], 64)
-
-    backbone_kwargs = dict(
+    frozen_backbone_kwargs = dict(
         input_dim=input_dim,
         enrichment_kwargs=dict(
             node_dim=32,
@@ -61,9 +61,23 @@ def get_model(data_config, **kwargs):
         ),
     )
 
+    # Parallel backbone config (used when backbone_mode='parallel')
+    parallel_backbone_kwargs = dict(
+        input_dim=input_dim,
+        identity_dim=64,
+        context_dim=128,
+        num_context_layers=2,
+        context_num_neighbors=16,
+        context_edge_dim=8,
+        context_node_dim=32,
+        context_message_dim=64,
+    )
+
     # V3 model config — ABCNet-inspired GAPLayers
     configuration = dict(
-        backbone_kwargs=backbone_kwargs,
+        backbone_mode=backbone_mode,
+        backbone_kwargs=frozen_backbone_kwargs,
+        parallel_backbone_kwargs=parallel_backbone_kwargs,
         # GAPLayer 1: kNN in physical (eta, phi) space
         gap1_encoding_dim=64,
         gap1_num_neighbors=16,
@@ -83,12 +97,13 @@ def get_model(data_config, **kwargs):
         focal_gamma=2.0,
     )
     configuration.update(**kwargs)
+    _logger.info('Backbone mode: %s', backbone_mode)
     _logger.info('Model config: %s' % str(configuration))
 
     model = TauTrackFinderV3(**configuration)
 
-    # Load pretrained backbone weights
-    if pretrained_backbone_path:
+    # Load pretrained backbone weights (frozen mode only)
+    if backbone_mode == 'frozen' and pretrained_backbone_path:
         _logger.info(
             'Loading pretrained backbone from: %s', pretrained_backbone_path,
         )
@@ -114,15 +129,18 @@ def get_model(data_config, **kwargs):
         model.backbone.load_state_dict(backbone_state)
         _logger.info('Pretrained backbone loaded successfully.')
 
-    # Freeze/unfreeze backbone
-    if backbone_frozen:
-        for parameter in model.backbone.parameters():
-            parameter.requires_grad = False
-        _logger.info('Backbone frozen (no gradients).')
+    # Freeze/unfreeze backbone (frozen mode only — parallel is always trainable)
+    if backbone_mode == 'frozen':
+        if backbone_frozen:
+            for parameter in model.backbone.parameters():
+                parameter.requires_grad = False
+            _logger.info('Backbone frozen (no gradients).')
+        else:
+            for parameter in model.backbone.parameters():
+                parameter.requires_grad = True
+            _logger.info('Backbone unfrozen (end-to-end training).')
     else:
-        for parameter in model.backbone.parameters():
-            parameter.requires_grad = True
-        _logger.info('Backbone unfrozen (end-to-end training).')
+        _logger.info('Parallel backbone: fully trainable, no pretrained weights.')
 
     model_info = {
         'input_names': list(data_config.input_names),

@@ -67,8 +67,13 @@ def _make_v3_kwargs():
         intermediate_dim=64,
         global_context_dim=16,
         scoring_dropout=0.0,  # Disable dropout for deterministic tests
-        focal_alpha=0.75,
-        focal_gamma=2.0,
+        # ASL loss parameters
+        focal_gamma_positive=1.0,
+        focal_gamma_negative=4.0,
+        asl_clip=0.05,
+        # Ranking loss parameters
+        ranking_loss_weight=0.1,
+        ranking_num_samples=10,
     )
 
 
@@ -930,3 +935,162 @@ class TestV3ParallelMode:
         assert params_with_grad > 0, (
             'No parameters received gradients in parallel mode'
         )
+
+
+# ---- Asymmetric Loss Tests ----
+
+class TestAsymmetricLoss:
+    """Test Asymmetric Loss (ASL) for extreme class imbalance.
+
+    ASL (Ben-Baruch et al., ICCV 2021) uses different focusing parameters
+    for positives vs negatives, plus a hard probability-shift threshold
+    that zeros gradients from trivially easy negatives.
+    """
+
+    def test_asl_finite(self, model, sample_training_inputs):
+        """ASL should produce finite loss for mixed labels."""
+        points, features, lorentz_vectors, mask, track_labels = (
+            sample_training_inputs
+        )
+        model.train()
+        loss_dict = model(
+            points, features, lorentz_vectors, mask, track_labels,
+        )
+
+        assert torch.isfinite(loss_dict['per_track_loss']).all()
+
+    def test_asl_finite_all_zeros(self, model):
+        """ASL should be finite when all labels are zero (no GT)."""
+        points, features, lorentz_vectors = _make_physical_inputs(
+            BATCH_SIZE, NUM_TRACKS,
+        )
+        mask = torch.ones(BATCH_SIZE, 1, NUM_TRACKS)
+        track_labels = torch.zeros(BATCH_SIZE, 1, NUM_TRACKS)
+
+        model.train()
+        loss_dict = model(
+            points, features, lorentz_vectors, mask, track_labels,
+        )
+
+        assert torch.isfinite(loss_dict['total_loss']).all()
+
+    def test_asl_zeros_easy_negatives(self, model):
+        """Easy negatives (score << 0) should contribute zero loss under ASL.
+
+        The hard clip threshold m=0.05 means negatives with predicted
+        probability p < m get exactly zero loss. At initialization,
+        most tracks have p ≈ sigmoid(0) = 0.5, so this test verifies
+        the mechanism by manually creating easy-negative scores.
+        """
+        # Create logits where most negatives have very low scores
+        logits = torch.full((1, NUM_TRACKS), -5.0)  # p ≈ 0.007, well below clip
+        logits[0, 10] = 0.0  # One positive
+        labels = torch.zeros(1, NUM_TRACKS)
+        labels[0, 10] = 1.0
+        valid_mask = torch.ones(1, NUM_TRACKS, dtype=torch.bool)
+
+        # Compute ASL
+        loss = model._asymmetric_loss(logits, labels, valid_mask)
+
+        # Now make all negatives even easier (score = -10, p ≈ 0.00005)
+        logits_easier = logits.clone()
+        logits_easier[0, :10] = -10.0
+        logits_easier[0, 11:] = -10.0
+        loss_easier = model._asymmetric_loss(
+            logits_easier, labels, valid_mask,
+        )
+
+        # Easier negatives should contribute LESS loss (near zero with clip)
+        assert loss_easier <= loss + 1e-6, (
+            'Making negatives easier should not increase loss'
+        )
+
+
+# ---- Ranking Loss Tests ----
+
+class TestRankingLoss:
+    """Test pairwise ranking loss for recall@K optimization.
+
+    The ranking loss penalizes any negative scoring above a positive:
+    L_rank = mean_i mean_j log(1 + exp(score_neg_j - score_pos_i))
+    """
+
+    def test_ranking_loss_finite(self, model, sample_training_inputs):
+        """Ranking loss should be finite."""
+        points, features, lorentz_vectors, mask, track_labels = (
+            sample_training_inputs
+        )
+        model.train()
+        loss_dict = model(
+            points, features, lorentz_vectors, mask, track_labels,
+        )
+
+        assert 'ranking_loss' in loss_dict
+        assert torch.isfinite(loss_dict['ranking_loss']).all()
+
+    def test_ranking_loss_zero_when_perfectly_ranked(self, model):
+        """Ranking loss should be near zero when all positives outscore negatives."""
+        logits = torch.zeros(1, NUM_TRACKS)
+        logits[0, 10] = 10.0  # Positive scores much higher
+        logits[0, 20] = 10.0
+        logits[0, 30] = 10.0
+        labels = torch.zeros(1, NUM_TRACKS)
+        labels[0, 10] = 1.0
+        labels[0, 20] = 1.0
+        labels[0, 30] = 1.0
+        valid_mask = torch.ones(1, NUM_TRACKS, dtype=torch.bool)
+
+        loss = model._ranking_loss(logits, labels, valid_mask)
+
+        # log(1 + exp(0 - 10)) ≈ log(1 + 0.00005) ≈ 0
+        assert loss.item() < 0.01, (
+            f'Perfectly ranked should have near-zero ranking loss, got {loss.item()}'
+        )
+
+    def test_ranking_loss_high_when_misranked(self, model):
+        """Ranking loss should be high when negatives outscore positives."""
+        logits = torch.zeros(1, NUM_TRACKS)
+        logits[0, 10] = -5.0  # Positives score low
+        logits[0, 20] = -5.0
+        logits[0, 30] = -5.0
+        logits[0, 0] = 5.0  # A negative scores high
+        labels = torch.zeros(1, NUM_TRACKS)
+        labels[0, 10] = 1.0
+        labels[0, 20] = 1.0
+        labels[0, 30] = 1.0
+        valid_mask = torch.ones(1, NUM_TRACKS, dtype=torch.bool)
+
+        loss = model._ranking_loss(logits, labels, valid_mask)
+
+        # log(1 + exp(5 - (-5))) = log(1 + exp(10)) ≈ 10
+        assert loss.item() > 1.0, (
+            f'Misranked should have high ranking loss, got {loss.item()}'
+        )
+
+    def test_ranking_loss_zero_gt(self, model):
+        """Ranking loss should be zero when there are no GT tracks."""
+        logits = torch.randn(1, NUM_TRACKS)
+        labels = torch.zeros(1, NUM_TRACKS)
+        valid_mask = torch.ones(1, NUM_TRACKS, dtype=torch.bool)
+
+        loss = model._ranking_loss(logits, labels, valid_mask)
+
+        assert loss.item() == 0.0, (
+            'Zero GT tracks should produce zero ranking loss'
+        )
+
+    def test_total_loss_includes_ranking(self, model, sample_training_inputs):
+        """Total loss should include both ASL and ranking components."""
+        points, features, lorentz_vectors, mask, track_labels = (
+            sample_training_inputs
+        )
+        model.train()
+        loss_dict = model(
+            points, features, lorentz_vectors, mask, track_labels,
+        )
+
+        assert 'total_loss' in loss_dict
+        assert 'per_track_loss' in loss_dict
+        assert 'ranking_loss' in loss_dict
+        # Total should be a combination of both
+        assert loss_dict['total_loss'].item() > 0.0

@@ -279,6 +279,69 @@ class TestGAPLayer:
         # Both should produce same shape
         assert single_output.shape == multi_output.shape
 
+    def test_mia_high_dim_attention(self):
+        """MIA mode should produce multi-channel attention weights, not scalar.
+
+        With MIA (More-Interaction Attention), each edge gets a D-dimensional
+        attention vector instead of a scalar. Each dimension acts as a separate
+        attention head with head_dim=1, element-wise scaling the edge features.
+        """
+        input_dim = 64
+        layer = GAPLayer(
+            input_dim=input_dim,
+            encoding_dim=GAP_ENCODING_DIM,
+            num_neighbors=GAP_NUM_NEIGHBORS,
+            num_heads=1,
+            use_mia=True,
+        )
+
+        features = torch.randn(BATCH_SIZE, input_dim, NUM_TRACKS)
+        neighbor_indices = torch.randint(
+            0, NUM_TRACKS, (BATCH_SIZE, NUM_TRACKS, GAP_NUM_NEIGHBORS),
+        )
+        mask = torch.ones(BATCH_SIZE, 1, NUM_TRACKS, dtype=torch.bool)
+
+        attention_features, graph_features = layer(
+            features, neighbor_indices, mask,
+        )
+
+        # Output shape should still be (B, encoding_dim, P)
+        assert attention_features.shape == (
+            BATCH_SIZE, GAP_ENCODING_DIM, NUM_TRACKS,
+        )
+
+    def test_mia_attention_weights_sum_to_one_per_channel(self):
+        """Each channel of MIA attention should independently sum to 1."""
+        input_dim = 64
+        layer = GAPLayer(
+            input_dim=input_dim,
+            encoding_dim=GAP_ENCODING_DIM,
+            num_neighbors=GAP_NUM_NEIGHBORS,
+            num_heads=1,
+            use_mia=True,
+        )
+
+        features = torch.randn(BATCH_SIZE, input_dim, NUM_TRACKS)
+        neighbor_indices = torch.randint(
+            0, NUM_TRACKS, (BATCH_SIZE, NUM_TRACKS, GAP_NUM_NEIGHBORS),
+        )
+        mask = torch.ones(BATCH_SIZE, 1, NUM_TRACKS, dtype=torch.bool)
+
+        # Get MIA attention weights: (B, encoding_dim, P, K)
+        attention_weights = layer.compute_mia_attention_weights(
+            features, neighbor_indices, mask,
+        )
+
+        # Each channel should sum to 1 over K for valid nodes
+        channel_sums = attention_weights.sum(dim=-1)  # (B, encoding_dim, P)
+        valid_mask_expanded = mask.expand_as(channel_sums)
+
+        torch.testing.assert_close(
+            channel_sums[valid_mask_expanded],
+            torch.ones_like(channel_sums[valid_mask_expanded]),
+            atol=1e-5, rtol=1e-5,
+        )
+
     def test_edge_features_are_differences(self):
         """Edge features should be y_ij = feature_j - feature_i."""
         input_dim = 64

@@ -259,37 +259,71 @@ def compute_recall_at_k_metrics(
     per_track_scores: torch.Tensor,
     track_labels: torch.Tensor,
     mask: torch.Tensor,
-    k_values: tuple[int, ...] = (10, 20, 30),
+    k_values: tuple[int, ...] = (10, 20, 30, 100),
 ) -> dict[str, float]:
-    """Compute recall@K metrics for track finding (head-agnostic).
+    """Compute recall@K, d-prime, and median GT rank for track finding.
 
     Tracks are ranked by score (descending). For each K, recall@K is
     the fraction of GT pion tracks found in the top-K predictions.
+
+    Additional metrics:
+        - d_prime: separation between GT and background score distributions,
+          d' = (mu_gt - mu_bg) / sqrt(0.5 * (sigma_gt^2 + sigma_bg^2)).
+          Higher = better separation.
+        - median_gt_rank: median rank of GT pions in the sorted score list.
+          Lower = better (0 = top-ranked).
 
     Args:
         per_track_scores: (B, P) per-track ranking scores.
         track_labels: (B, 1, P) binary labels (1.0 = tau pion).
         mask: (B, 1, P) boolean mask (True = valid track).
-        k_values: Tuple of K values for recall@K (default: 10, 20, 30).
+        k_values: Tuple of K values for recall@K (default: 10, 20, 30, 100).
 
     Returns:
-        Dict with recall_at_K for each K, plus total_gt_tracks.
+        Dict with recall_at_K for each K, d_prime, median_gt_rank,
+        and total_gt_tracks.
     """
     batch_size = per_track_scores.shape[0]
     labels_flat = track_labels.squeeze(1) * mask.squeeze(1).float()
+    valid_mask = mask.squeeze(1).bool()
 
     masked_scores = per_track_scores.clone()
-    masked_scores[~mask.squeeze(1).bool()] = float('-inf')
+    masked_scores[~valid_mask] = float('-inf')
     sorted_indices = masked_scores.argsort(dim=1, descending=True)
+
+    # Build rank lookup: rank_of[i] = position of track i in sorted order
+    rank_lookup = torch.zeros_like(sorted_indices)
+    for batch_index in range(batch_size):
+        rank_lookup[batch_index, sorted_indices[batch_index]] = torch.arange(
+            sorted_indices.shape[1], device=sorted_indices.device,
+        )
 
     recall_sums = {k: 0.0 for k in k_values}
     total_events_with_gt = 0
     total_gt_tracks = 0
 
+    # Collect scores and ranks for d-prime and median rank
+    all_gt_scores = []
+    all_background_scores = []
+    all_gt_ranks = []
+
     for batch_index in range(batch_size):
         gt_positions = labels_flat[batch_index].nonzero(as_tuple=True)[0]
         gt_set = set(gt_positions.tolist())
         num_gt = len(gt_set)
+
+        # Collect scores for d-prime
+        event_valid = valid_mask[batch_index]
+        event_labels = labels_flat[batch_index]
+        event_scores = per_track_scores[batch_index]
+
+        gt_mask = (event_labels == 1.0) & event_valid
+        background_mask = (event_labels == 0.0) & event_valid
+
+        if gt_mask.any():
+            all_gt_scores.append(event_scores[gt_mask])
+        if background_mask.any():
+            all_background_scores.append(event_scores[background_mask])
 
         if num_gt == 0:
             continue
@@ -297,16 +331,50 @@ def compute_recall_at_k_metrics(
         total_events_with_gt += 1
         total_gt_tracks += num_gt
 
+        # Recall@K
         event_sorted = sorted_indices[batch_index].tolist()
         for k in k_values:
             top_k_set = set(event_sorted[:k])
             found = len(top_k_set & gt_set)
             recall_sums[k] += found / num_gt
 
+        # GT pion ranks
+        for gt_position in gt_positions:
+            all_gt_ranks.append(rank_lookup[batch_index, gt_position].item())
+
     metrics = {}
     for k in k_values:
         metrics[f'recall_at_{k}'] = recall_sums[k] / max(1, total_events_with_gt)
     metrics['total_gt_tracks'] = total_gt_tracks
+
+    # d-prime: score separation between GT and background
+    # d' = (mu_gt - mu_bg) / sqrt(0.5 * (sigma_gt^2 + sigma_bg^2))
+    if all_gt_scores and all_background_scores:
+        gt_scores_cat = torch.cat(all_gt_scores)
+        background_scores_cat = torch.cat(all_background_scores)
+        mu_gt = gt_scores_cat.mean().item()
+        mu_background = background_scores_cat.mean().item()
+        sigma_gt = gt_scores_cat.std().item()
+        sigma_background = background_scores_cat.std().item()
+        pooled_std = (0.5 * (sigma_gt ** 2 + sigma_background ** 2)) ** 0.5
+        metrics['d_prime'] = (
+            (mu_gt - mu_background) / pooled_std if pooled_std > 1e-10 else 0.0
+        )
+    else:
+        metrics['d_prime'] = 0.0
+
+    # Median GT rank
+    if all_gt_ranks:
+        sorted_ranks = sorted(all_gt_ranks)
+        midpoint = len(sorted_ranks) // 2
+        if len(sorted_ranks) % 2 == 0:
+            metrics['median_gt_rank'] = (
+                sorted_ranks[midpoint - 1] + sorted_ranks[midpoint]
+            ) / 2.0
+        else:
+            metrics['median_gt_rank'] = float(sorted_ranks[midpoint])
+    else:
+        metrics['median_gt_rank'] = float('inf')
 
     return metrics
 
@@ -495,6 +563,7 @@ def validate(
     loss_accumulators: dict[str, float] | None = None
     recall_accumulators = {
         'recall_at_10': 0.0, 'recall_at_20': 0.0, 'recall_at_30': 0.0,
+        'recall_at_100': 0.0, 'd_prime': 0.0, 'median_gt_rank': 0.0,
         'total_gt_tracks': 0,
     }
     num_batches = 0
@@ -530,7 +599,8 @@ def validate(
             )
 
             recall_accumulators['total_gt_tracks'] += batch_metrics['total_gt_tracks']
-            for k_key in ['recall_at_10', 'recall_at_20', 'recall_at_30']:
+            for k_key in ['recall_at_10', 'recall_at_20', 'recall_at_30',
+                         'recall_at_100', 'd_prime', 'median_gt_rank']:
                 recall_accumulators[k_key] += batch_metrics[k_key]
 
             num_batches += 1
@@ -909,6 +979,7 @@ def main():
     loss_history = {
         'train': [], 'val': [], 'lr': [],
         'recall_at_10': [], 'recall_at_20': [], 'recall_at_30': [],
+        'recall_at_100': [], 'd_prime': [], 'median_gt_rank': [],
     }
 
     if args.resume is not None:
@@ -929,8 +1000,8 @@ def main():
             f'best_val_loss={best_val_loss:.5f} (epoch {best_val_epoch})',
         )
 
-    # ---- Phase 1: Training with frozen backbone ----
-    logger.info('=== Phase 1: Training with frozen backbone ===')
+    # ---- Phase 1: Main training ----
+    logger.info('=== Phase 1: Training ===')
 
     for epoch in range(start_epoch, args.epochs + 1):
         logger.info(f'=== Epoch {epoch}/{args.epochs} ===')
@@ -982,13 +1053,19 @@ def main():
             best_val_loss = val_loss
             best_val_epoch = epoch
 
+        val_summary = (
+            f'R@10: {val_metrics["recall_at_10"]:.4f} | '
+            f'R@20: {val_metrics["recall_at_20"]:.4f} | '
+            f'R@30: {val_metrics["recall_at_30"]:.4f} | '
+            f'R@100: {val_metrics["recall_at_100"]:.4f} | '
+            f'd\': {val_metrics["d_prime"]:.3f} | '
+            f'rank: {val_metrics["median_gt_rank"]:.0f}'
+        )
         if is_best:
             logger.info(
                 f'Epoch {epoch} val | '
                 f'total: {val_loss:.5f} ★ new best | '
-                f'R@10: {val_metrics["recall_at_10"]:.4f} | '
-                f'R@20: {val_metrics["recall_at_20"]:.4f} | '
-                f'R@30: {val_metrics["recall_at_30"]:.4f}',
+                f'{val_summary}',
             )
         else:
             epochs_since_best = epoch - best_val_epoch
@@ -997,9 +1074,7 @@ def main():
                 f'total: {val_loss:.5f} '
                 f'(best: {best_val_loss:.5f}, '
                 f'{epochs_since_best} epochs ago) | '
-                f'R@10: {val_metrics["recall_at_10"]:.4f} | '
-                f'R@20: {val_metrics["recall_at_20"]:.4f} | '
-                f'R@30: {val_metrics["recall_at_30"]:.4f}',
+                f'{val_summary}',
             )
 
         # LR scheduler step
@@ -1021,15 +1096,11 @@ def main():
         for key, value in val_losses.items():
             if key != 'total_loss':
                 tensorboard_writer.add_scalar(f'Loss/val_{key}', value, epoch)
-        tensorboard_writer.add_scalar(
-            'Metrics/recall_at_10', val_metrics['recall_at_10'], epoch,
-        )
-        tensorboard_writer.add_scalar(
-            'Metrics/recall_at_20', val_metrics['recall_at_20'], epoch,
-        )
-        tensorboard_writer.add_scalar(
-            'Metrics/recall_at_30', val_metrics['recall_at_30'], epoch,
-        )
+        for metric_key in ['recall_at_10', 'recall_at_20', 'recall_at_30',
+                           'recall_at_100', 'd_prime', 'median_gt_rank']:
+            tensorboard_writer.add_scalar(
+                f'Metrics/{metric_key}', val_metrics[metric_key], epoch,
+            )
         tensorboard_writer.add_scalar('LR/epoch', current_lr, epoch)
 
         # Loss history (head-specific keys added dynamically)
@@ -1043,9 +1114,9 @@ def main():
             if short_key not in loss_history:
                 loss_history[short_key] = []
             loss_history[short_key].append(value)
-        loss_history['recall_at_10'].append(val_metrics['recall_at_10'])
-        loss_history['recall_at_20'].append(val_metrics['recall_at_20'])
-        loss_history['recall_at_30'].append(val_metrics['recall_at_30'])
+        for metric_key in ['recall_at_10', 'recall_at_20', 'recall_at_30',
+                           'recall_at_100', 'd_prime', 'median_gt_rank']:
+            loss_history[metric_key].append(val_metrics[metric_key])
         save_loss_history(loss_history, experiment_dir)
 
         # Checkpointing
@@ -1182,13 +1253,19 @@ def main():
                 best_val_loss = val_loss
                 best_val_epoch = epoch
 
+            finetune_val_summary = (
+                f'R@10: {val_metrics["recall_at_10"]:.4f} | '
+                f'R@20: {val_metrics["recall_at_20"]:.4f} | '
+                f'R@30: {val_metrics["recall_at_30"]:.4f} | '
+                f'R@100: {val_metrics["recall_at_100"]:.4f} | '
+                f'd\': {val_metrics["d_prime"]:.3f} | '
+                f'rank: {val_metrics["median_gt_rank"]:.0f}'
+            )
             logger.info(
                 f'Epoch {epoch} val | '
                 f'total: {val_loss:.5f}'
                 f'{" ★ new best" if is_best else ""} | '
-                f'R@10: {val_metrics["recall_at_10"]:.4f} | '
-                f'R@20: {val_metrics["recall_at_20"]:.4f} | '
-                f'R@30: {val_metrics["recall_at_30"]:.4f}',
+                f'{finetune_val_summary}',
             )
 
             previous_lr = scheduler.get_last_lr()[0]
@@ -1200,18 +1277,11 @@ def main():
                 'Loss/train_epoch', train_losses['total_loss'], epoch,
             )
             tensorboard_writer.add_scalar('Loss/val_epoch', val_loss, epoch)
-            tensorboard_writer.add_scalar(
-                'Metrics/recall_at_10',
-                val_metrics['recall_at_10'], epoch,
-            )
-            tensorboard_writer.add_scalar(
-                'Metrics/recall_at_20',
-                val_metrics['recall_at_20'], epoch,
-            )
-            tensorboard_writer.add_scalar(
-                'Metrics/recall_at_30',
-                val_metrics['recall_at_30'], epoch,
-            )
+            for metric_key in ['recall_at_10', 'recall_at_20', 'recall_at_30',
+                               'recall_at_100', 'd_prime', 'median_gt_rank']:
+                tensorboard_writer.add_scalar(
+                    f'Metrics/{metric_key}', val_metrics[metric_key], epoch,
+                )
             tensorboard_writer.add_scalar('LR/epoch', current_lr, epoch)
 
             # Loss history
@@ -1225,9 +1295,9 @@ def main():
                 if short_key not in loss_history:
                     loss_history[short_key] = []
                 loss_history[short_key].append(value)
-            loss_history['recall_at_10'].append(val_metrics['recall_at_10'])
-            loss_history['recall_at_20'].append(val_metrics['recall_at_20'])
-            loss_history['recall_at_30'].append(val_metrics['recall_at_30'])
+            for metric_key in ['recall_at_10', 'recall_at_20', 'recall_at_30',
+                               'recall_at_100', 'd_prime', 'median_gt_rank']:
+                loss_history[metric_key].append(val_metrics[metric_key])
             save_loss_history(loss_history, experiment_dir)
 
             # Checkpointing

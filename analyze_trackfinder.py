@@ -62,6 +62,11 @@ def parse_arguments() -> argparse.Namespace:
         '--max-batches', type=int, default=None,
         help='Max batches to process (None = all)',
     )
+    parser.add_argument(
+        '--backbone-mode', default=None,
+        help='Backbone mode override (frozen, parallel). '
+             'Passed to network wrapper as backbone_mode kwarg.',
+    )
     return parser.parse_args()
 
 
@@ -71,6 +76,7 @@ def build_model_and_load_checkpoint(
     checkpoint_path: str,
     pretrained_backbone_path: str | None,
     device: torch.device,
+    backbone_mode: str | None = None,
 ) -> torch.nn.Module:
     """Construct model from network wrapper and load checkpoint weights."""
     network_module = load_network_module(network_path)
@@ -78,6 +84,8 @@ def build_model_and_load_checkpoint(
     model_kwargs = {}
     if pretrained_backbone_path is not None:
         model_kwargs['pretrained_backbone_path'] = pretrained_backbone_path
+    if backbone_mode is not None:
+        model_kwargs['backbone_mode'] = backbone_mode
 
     model, _ = network_module.get_model(data_config, **model_kwargs)
     model = model.to(device)
@@ -493,6 +501,7 @@ def main() -> None:
     model = build_model_and_load_checkpoint(
         args.network, data_config, args.checkpoint,
         args.pretrained_backbone, device,
+        backbone_mode=args.backbone_mode,
     )
 
     # ---- Inference ----

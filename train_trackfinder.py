@@ -619,6 +619,9 @@ def validate(
         'recall_at_10': recall_accumulators['recall_at_10'] / max(1, num_batches),
         'recall_at_20': recall_accumulators['recall_at_20'] / max(1, num_batches),
         'recall_at_30': recall_accumulators['recall_at_30'] / max(1, num_batches),
+        'recall_at_100': recall_accumulators['recall_at_100'] / max(1, num_batches),
+        'd_prime': recall_accumulators['d_prime'] / max(1, num_batches),
+        'median_gt_rank': recall_accumulators['median_gt_rank'] / max(1, num_batches),
         'total_gt_tracks': recall_accumulators['total_gt_tracks'],
     }
 

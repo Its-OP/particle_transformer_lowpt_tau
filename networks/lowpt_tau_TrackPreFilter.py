@@ -38,6 +38,8 @@ def get_model(data_config, **kwargs):
         asl_clip=0.05,
         asl_weight=1.0,
         ranking_num_samples=50,
+        use_pairwise_physics=True,
+        pairwise_edge_dim=16,
     )
     configuration.update(**kwargs)
     _logger.info('TrackPreFilter config: %s' % str(configuration))

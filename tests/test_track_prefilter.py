@@ -296,3 +296,98 @@ class TestTwoStagePipeline:
         assert torch.all(
             (filtered['track_labels'] == 0) | (filtered['track_labels'] == 1)
         )
+
+
+# ---- Pairwise Physics Features ----
+
+class TestPairwisePhysics:
+    """Test pairwise Lorentz-vector features in the pre-filter."""
+
+    def test_pairwise_forward_shape(self):
+        """Model with pairwise physics should produce same output shape."""
+        model = TrackPreFilter(
+            mode='hybrid', input_dim=INPUT_DIM, use_pairwise_physics=True,
+        )
+        points, features, lorentz_vectors, mask, _ = _make_training_inputs()
+        scores = model(points, features, lorentz_vectors, mask)
+        assert scores.shape == (BATCH_SIZE, NUM_TRACKS)
+
+    def test_pairwise_scores_finite(self):
+        """Scores should be finite with pairwise physics enabled."""
+        model = TrackPreFilter(
+            mode='hybrid', input_dim=INPUT_DIM, use_pairwise_physics=True,
+        )
+        points, features, lorentz_vectors, mask, _ = _make_training_inputs()
+        scores = model(points, features, lorentz_vectors, mask)
+        valid_mask = mask.squeeze(1).bool()
+        assert torch.isfinite(scores[valid_mask]).all()
+
+    def test_pairwise_loss_finite(self):
+        """Loss should be finite with pairwise physics enabled."""
+        model = TrackPreFilter(
+            mode='hybrid', input_dim=INPUT_DIM,
+            use_pairwise_physics=True, use_asl=True,
+        )
+        points, features, lorentz_vectors, mask, track_labels = (
+            _make_training_inputs()
+        )
+        loss_dict = model.compute_loss(
+            points, features, lorentz_vectors, mask, track_labels,
+        )
+        assert torch.isfinite(loss_dict['total_loss']).all()
+
+    def test_pairwise_gradients_flow(self):
+        """Gradients should flow through pairwise feature computation."""
+        model = TrackPreFilter(
+            mode='hybrid', input_dim=INPUT_DIM,
+            use_pairwise_physics=True, use_asl=True,
+        )
+        points, features, lorentz_vectors, mask, track_labels = (
+            _make_training_inputs()
+        )
+        loss_dict = model.compute_loss(
+            points, features, lorentz_vectors, mask, track_labels,
+        )
+        loss_dict['total_loss'].backward()
+
+        params_with_grad = sum(
+            1 for _, p in model.named_parameters()
+            if p.grad is not None and p.grad.abs().sum() > 0
+        )
+        assert params_with_grad > 0
+
+    def test_pairwise_changes_scores(self):
+        """Enabling pairwise physics should produce different scores."""
+        points, features, lorentz_vectors, mask, _ = _make_training_inputs()
+
+        model_without = TrackPreFilter(
+            mode='hybrid', input_dim=INPUT_DIM,
+            use_pairwise_physics=False,
+        )
+        model_with = TrackPreFilter(
+            mode='hybrid', input_dim=INPUT_DIM,
+            use_pairwise_physics=True,
+        )
+
+        # Copy shared weights
+        shared_keys = [
+            k for k in model_without.state_dict()
+            if k in model_with.state_dict()
+            and model_without.state_dict()[k].shape == model_with.state_dict()[k].shape
+        ]
+        state = model_with.state_dict()
+        for k in shared_keys:
+            state[k] = model_without.state_dict()[k]
+        model_with.load_state_dict(state)
+
+        model_without.eval()
+        model_with.eval()
+        with torch.no_grad():
+            scores_without = model_without(points, features, lorentz_vectors, mask)
+            scores_with = model_with(points, features, lorentz_vectors, mask)
+
+        valid = mask.squeeze(1).bool()
+        # Scores should differ because pairwise features add extra information
+        assert not torch.allclose(
+            scores_without[valid], scores_with[valid], atol=1e-3,
+        )

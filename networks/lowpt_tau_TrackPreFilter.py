@@ -33,8 +33,6 @@ def get_model(data_config, **kwargs):
         num_neighbors=16,
         num_message_rounds=2,
         ranking_num_samples=50,
-        use_pairwise_physics=True,
-        pairwise_edge_dim=16,
     )
     configuration.update(**kwargs)
     _logger.info('TrackPreFilter config: %s' % str(configuration))

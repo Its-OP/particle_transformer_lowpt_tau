@@ -326,7 +326,7 @@ class TestPairwisePhysics:
         """Loss should be finite with pairwise physics enabled."""
         model = TrackPreFilter(
             mode='hybrid', input_dim=INPUT_DIM,
-            use_pairwise_physics=True, use_asl=True,
+            use_pairwise_physics=True,
         )
         points, features, lorentz_vectors, mask, track_labels = (
             _make_training_inputs()
@@ -340,7 +340,7 @@ class TestPairwisePhysics:
         """Gradients should flow through pairwise feature computation."""
         model = TrackPreFilter(
             mode='hybrid', input_dim=INPUT_DIM,
-            use_pairwise_physics=True, use_asl=True,
+            use_pairwise_physics=True,
         )
         points, features, lorentz_vectors, mask, track_labels = (
             _make_training_inputs()

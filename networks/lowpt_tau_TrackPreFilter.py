@@ -1,6 +1,6 @@
 """Network wrapper for TrackPreFilter (Stage 1 of two-stage pipeline).
 
-Default configuration: hybrid+asl mode with hidden_dim=128,
+Default configuration: hybrid mode with hidden_dim=128,
 num_message_rounds=2, latent_dim=32, ranking_num_samples=50.
 Best discovered combination from hyperparameter sweep + SOTA denoising.
 """
@@ -32,11 +32,6 @@ def get_model(data_config, **kwargs):
         latent_dim=32,
         num_neighbors=16,
         num_message_rounds=2,
-        use_asl=True,
-        asl_gamma_positive=1.0,
-        asl_gamma_negative=4.0,
-        asl_clip=0.05,
-        asl_weight=1.0,
         ranking_num_samples=50,
         use_pairwise_physics=True,
         pairwise_edge_dim=16,

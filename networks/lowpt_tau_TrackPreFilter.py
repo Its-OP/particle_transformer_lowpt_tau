@@ -1,7 +1,8 @@
 """Network wrapper for TrackPreFilter (Stage 1 of two-stage pipeline).
 
 Default configuration: hybrid+asl mode with hidden_dim=128,
-num_message_rounds=2 (wide128+2rounds — 100% R@200 on subset eval).
+num_message_rounds=2, latent_dim=32, ranking_num_samples=50.
+Best discovered combination from hyperparameter sweep + SOTA denoising.
 """
 
 from weaver.nn.model.TrackPreFilter import TrackPreFilter
@@ -28,7 +29,7 @@ def get_model(data_config, **kwargs):
         mode='hybrid',
         input_dim=input_dim,
         hidden_dim=128,
-        latent_dim=16,
+        latent_dim=32,
         num_neighbors=16,
         num_message_rounds=2,
         use_asl=True,
@@ -36,7 +37,7 @@ def get_model(data_config, **kwargs):
         asl_gamma_negative=4.0,
         asl_clip=0.05,
         asl_weight=1.0,
-        ranking_num_samples=20,
+        ranking_num_samples=50,
     )
     configuration.update(**kwargs)
     _logger.info('TrackPreFilter config: %s' % str(configuration))

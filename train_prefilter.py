@@ -204,12 +204,7 @@ def validate(
     """Validate and compute recall@K metrics."""
     model.eval()
     loss_accumulators: dict[str, float] | None = None
-    recall_accumulators = {
-        'recall_at_10': 0.0, 'recall_at_20': 0.0, 'recall_at_30': 0.0,
-        'recall_at_100': 0.0, 'recall_at_200': 0.0,
-        'd_prime': 0.0, 'median_gt_rank': 0.0,
-        'total_gt_tracks': 0,
-    }
+    recall_accumulators: dict[str, float] | None = None
     num_batches = 0
 
     with torch.no_grad():
@@ -246,11 +241,11 @@ def validate(
                 k_values=(10, 20, 30, 100, 200),
             )
 
-            recall_accumulators['total_gt_tracks'] += batch_metrics['total_gt_tracks']
-            for k_key in ['recall_at_10', 'recall_at_20', 'recall_at_30',
-                         'recall_at_100', 'recall_at_200',
-                         'd_prime', 'median_gt_rank']:
-                recall_accumulators[k_key] += batch_metrics[k_key]
+            if recall_accumulators is None:
+                recall_accumulators = {key: 0 if key == 'total_gt_tracks' else 0.0
+                                       for key in batch_metrics}
+            for key in batch_metrics:
+                recall_accumulators[key] += batch_metrics[key]
 
             num_batches += 1
 
@@ -265,15 +260,14 @@ def validate(
     }
 
     metrics = {
-        'recall_at_10': recall_accumulators['recall_at_10'] / max(1, num_batches),
-        'recall_at_20': recall_accumulators['recall_at_20'] / max(1, num_batches),
-        'recall_at_30': recall_accumulators['recall_at_30'] / max(1, num_batches),
-        'recall_at_100': recall_accumulators['recall_at_100'] / max(1, num_batches),
-        'recall_at_200': recall_accumulators['recall_at_200'] / max(1, num_batches),
-        'd_prime': recall_accumulators['d_prime'] / max(1, num_batches),
-        'median_gt_rank': recall_accumulators['median_gt_rank'] / max(1, num_batches),
-        'total_gt_tracks': recall_accumulators['total_gt_tracks'],
-    }
+    if recall_accumulators is None:
+        recall_accumulators = {'total_gt_tracks': 0}
+    metrics = {}
+    for key, value in recall_accumulators.items():
+        if key == 'total_gt_tracks':
+            metrics[key] = value
+        else:
+            metrics[key] = value / max(1, num_batches)
 
     return loss_averages, metrics
 
@@ -538,12 +532,12 @@ def main():
                 best_val_loss = val_loss
                 best_val_epoch = epoch
 
+            perfect_200 = val_metrics.get('perfect_at_200', 0.0)
             val_summary = (
-                f'R@10: {val_metrics["recall_at_10"]:.4f} | '
-                f'R@20: {val_metrics["recall_at_20"]:.4f} | '
                 f'R@30: {val_metrics["recall_at_30"]:.4f} | '
                 f'R@100: {val_metrics["recall_at_100"]:.4f} | '
                 f'R@200: {val_metrics["recall_at_200"]:.4f} | '
+                f'P@200: {perfect_200:.4f} | '
                 f'd\': {val_metrics["d_prime"]:.3f} | '
                 f'rank: {val_metrics["median_gt_rank"]:.0f}'
             )
@@ -577,10 +571,11 @@ def main():
                     tensorboard_writer.add_scalar(
                         f'Loss/val_{key}', value, epoch,
                     )
-            for metric_key in ['recall_at_10', 'recall_at_20', 'recall_at_30',
-                               'recall_at_100', 'd_prime', 'median_gt_rank']:
+            for metric_key, metric_value in val_metrics.items():
+                if metric_key == 'total_gt_tracks':
+                    continue
                 tensorboard_writer.add_scalar(
-                    f'Metrics/{metric_key}', val_metrics[metric_key], epoch,
+                    f'Metrics/{metric_key}', metric_value, epoch,
                 )
             tensorboard_writer.add_scalar('LR/epoch', current_lr, epoch)
 
@@ -595,9 +590,12 @@ def main():
                 if short_key not in loss_history:
                     loss_history[short_key] = []
                 loss_history[short_key].append(value)
-            for metric_key in ['recall_at_10', 'recall_at_20', 'recall_at_30',
-                               'recall_at_100', 'd_prime', 'median_gt_rank']:
-                loss_history[metric_key].append(val_metrics[metric_key])
+            for metric_key, metric_value in val_metrics.items():
+                if metric_key == 'total_gt_tracks':
+                    continue
+                if metric_key not in loss_history:
+                    loss_history[metric_key] = []
+                loss_history[metric_key].append(metric_value)
             save_loss_history(loss_history, experiment_dir)
 
             # Checkpointing

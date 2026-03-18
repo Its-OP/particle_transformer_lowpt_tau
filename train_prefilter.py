@@ -206,7 +206,8 @@ def validate(
     loss_accumulators: dict[str, float] | None = None
     recall_accumulators = {
         'recall_at_10': 0.0, 'recall_at_20': 0.0, 'recall_at_30': 0.0,
-        'recall_at_100': 0.0, 'd_prime': 0.0, 'median_gt_rank': 0.0,
+        'recall_at_100': 0.0, 'recall_at_200': 0.0,
+        'd_prime': 0.0, 'median_gt_rank': 0.0,
         'total_gt_tracks': 0,
     }
     num_batches = 0
@@ -242,11 +243,13 @@ def validate(
 
             batch_metrics = compute_recall_at_k_metrics(
                 per_track_scores, track_labels, mask,
+                k_values=(10, 20, 30, 100, 200),
             )
 
             recall_accumulators['total_gt_tracks'] += batch_metrics['total_gt_tracks']
             for k_key in ['recall_at_10', 'recall_at_20', 'recall_at_30',
-                         'recall_at_100', 'd_prime', 'median_gt_rank']:
+                         'recall_at_100', 'recall_at_200',
+                         'd_prime', 'median_gt_rank']:
                 recall_accumulators[k_key] += batch_metrics[k_key]
 
             num_batches += 1
@@ -266,6 +269,7 @@ def validate(
         'recall_at_20': recall_accumulators['recall_at_20'] / max(1, num_batches),
         'recall_at_30': recall_accumulators['recall_at_30'] / max(1, num_batches),
         'recall_at_100': recall_accumulators['recall_at_100'] / max(1, num_batches),
+        'recall_at_200': recall_accumulators['recall_at_200'] / max(1, num_batches),
         'd_prime': recall_accumulators['d_prime'] / max(1, num_batches),
         'median_gt_rank': recall_accumulators['median_gt_rank'] / max(1, num_batches),
         'total_gt_tracks': recall_accumulators['total_gt_tracks'],
@@ -484,7 +488,7 @@ def main():
     loss_history = {
         'train': [], 'val': [], 'lr': [],
         'recall_at_10': [], 'recall_at_20': [], 'recall_at_30': [],
-        'recall_at_100': [], 'd_prime': [], 'median_gt_rank': [],
+        'recall_at_100': [], 'recall_at_200': [], 'd_prime': [], 'median_gt_rank': [],
     }
 
     if args.resume is not None:
@@ -517,9 +521,11 @@ def main():
                 grad_clip_max_norm=args.grad_clip,
             )
 
+            val_steps = max(1, steps_per_epoch // 4)
             val_losses, val_metrics = validate(
                 model, val_loader, device, data_config,
                 mask_input_index, label_input_index,
+                max_steps=val_steps,
             )
 
             gc.collect()
@@ -537,6 +543,7 @@ def main():
                 f'R@20: {val_metrics["recall_at_20"]:.4f} | '
                 f'R@30: {val_metrics["recall_at_30"]:.4f} | '
                 f'R@100: {val_metrics["recall_at_100"]:.4f} | '
+                f'R@200: {val_metrics["recall_at_200"]:.4f} | '
                 f'd\': {val_metrics["d_prime"]:.3f} | '
                 f'rank: {val_metrics["median_gt_rank"]:.0f}'
             )

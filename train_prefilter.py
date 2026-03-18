@@ -259,7 +259,6 @@ def validate(
         for key, value in loss_accumulators.items()
     }
 
-    metrics = {
     if recall_accumulators is None:
         recall_accumulators = {'total_gt_tracks': 0}
     metrics = {}

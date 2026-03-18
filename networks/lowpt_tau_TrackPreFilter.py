@@ -33,6 +33,14 @@ def get_model(data_config, **kwargs):
         num_neighbors=16,
         num_message_rounds=2,
         ranking_num_samples=50,
+        use_triplet_scoring=True,
+        triplet_kwargs=dict(
+            num_anchors=200,
+            num_neighbors=512,
+            mass_threshold=1.777,
+            max_delta_r=3.0,
+            hidden_dim=32,
+        ),
     )
     configuration.update(**kwargs)
     _logger.info('TrackPreFilter config: %s' % str(configuration))

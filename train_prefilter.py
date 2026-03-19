@@ -22,7 +22,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import gc
 import json
 import logging
 import math
@@ -168,8 +167,6 @@ def train_one_epoch(
             )
 
         del inputs, model_inputs, track_labels, loss_dict
-        if device.type == 'cuda':
-            torch.cuda.empty_cache()
 
     if loss_accumulators is None:
         loss_accumulators = {'total_loss': 0.0}
@@ -219,22 +216,21 @@ def validate(
             )
             points, features, lorentz_vectors, mask = model_inputs
 
-            # Get loss
+            # Get loss and scores in a single forward pass.
+            # compute_loss() calls forward() internally and caches scores
+            # in loss_dict['_scores'] — avoids running the model twice.
             model.train()
             loss_dict = model.compute_loss(
                 points, features, lorentz_vectors, mask, track_labels,
             )
             model.eval()
 
+            per_track_scores = loss_dict.pop('_scores').detach()
+
             if loss_accumulators is None:
                 loss_accumulators = {key: 0.0 for key in loss_dict}
             for key in loss_accumulators:
                 loss_accumulators[key] += loss_dict[key].item()
-
-            # Get per-track scores for recall@K
-            per_track_scores = model(
-                points, features, lorentz_vectors, mask,
-            )
 
             batch_metrics = compute_recall_at_k_metrics(
                 per_track_scores, track_labels, mask,
@@ -540,10 +536,6 @@ def main():
                 mask_input_index, label_input_index,
                 max_steps=val_steps,
             )
-
-            gc.collect()
-            if device.type == 'cuda':
-                torch.cuda.empty_cache()
 
             val_loss = val_losses['total_loss']
             is_best = val_loss < best_val_loss

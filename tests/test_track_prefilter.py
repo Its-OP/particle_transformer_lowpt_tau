@@ -17,6 +17,7 @@ from weaver.nn.model.TrackPreFilter import TrackPreFilter
 BATCH_SIZE = 4
 NUM_TRACKS = 200
 INPUT_DIM = 7
+INPUT_DIM_EXTENDED = 13
 TOP_K = 50  # Smaller than production 200 for test speed
 
 
@@ -295,4 +296,123 @@ class TestTwoStagePipeline:
         # Filtered labels should be valid (0 or 1)
         assert torch.all(
             (filtered['track_labels'] == 0) | (filtered['track_labels'] == 1)
+        )
+
+
+# ---- Extended 13-Feature Configuration (wide192) ----
+
+def _make_extended_training_inputs():
+    """Create inputs with the extended 13-feature set and wide192 config."""
+    points, features, lorentz_vectors = _make_physical_inputs(
+        BATCH_SIZE, NUM_TRACKS, input_dim=INPUT_DIM_EXTENDED,
+    )
+    mask = torch.ones(BATCH_SIZE, 1, NUM_TRACKS)
+    mask[:, :, -30:] = 0.0
+
+    track_labels = torch.zeros(BATCH_SIZE, 1, NUM_TRACKS)
+    for batch_index in range(BATCH_SIZE):
+        track_labels[batch_index, 0, 10] = 1.0
+        track_labels[batch_index, 0, 20] = 1.0
+        track_labels[batch_index, 0, 30] = 1.0
+
+    return points, features, lorentz_vectors, mask, track_labels
+
+
+class TestExtendedHybridMode:
+    """Test hybrid mode with extended 13-feature input and wide192 config.
+
+    Verifies the widened architecture (hidden_dim=192, latent_dim=48)
+    works correctly with the 13-feature extended dataset.
+    """
+
+    def test_forward_shape(self):
+        model = TrackPreFilter(
+            mode='hybrid', input_dim=INPUT_DIM_EXTENDED,
+            hidden_dim=192, latent_dim=48, num_message_rounds=2,
+        )
+        points, features, lorentz_vectors, mask, _ = (
+            _make_extended_training_inputs()
+        )
+        scores = model(points, features, lorentz_vectors, mask)
+        assert scores.shape == (BATCH_SIZE, NUM_TRACKS)
+
+    def test_scores_finite(self):
+        model = TrackPreFilter(
+            mode='hybrid', input_dim=INPUT_DIM_EXTENDED,
+            hidden_dim=192, latent_dim=48, num_message_rounds=2,
+        )
+        points, features, lorentz_vectors, mask, _ = (
+            _make_extended_training_inputs()
+        )
+        scores = model(points, features, lorentz_vectors, mask)
+        valid_mask = mask.squeeze(1).bool()
+        assert torch.isfinite(scores[valid_mask]).all()
+
+    def test_padded_scores_negative_inf(self):
+        """Padded tracks should get -inf with the wider model."""
+        model = TrackPreFilter(
+            mode='hybrid', input_dim=INPUT_DIM_EXTENDED,
+            hidden_dim=192, latent_dim=48, num_message_rounds=2,
+        )
+        points, features, lorentz_vectors, mask, _ = (
+            _make_extended_training_inputs()
+        )
+        scores = model(points, features, lorentz_vectors, mask)
+        padded_mask = ~mask.squeeze(1).bool()
+        assert torch.all(scores[padded_mask] == float('-inf'))
+
+    def test_loss_finite(self):
+        """All loss components should be finite with extended features."""
+        model = TrackPreFilter(
+            mode='hybrid', input_dim=INPUT_DIM_EXTENDED,
+            hidden_dim=192, latent_dim=48, num_message_rounds=2,
+        )
+        points, features, lorentz_vectors, mask, track_labels = (
+            _make_extended_training_inputs()
+        )
+        loss_dict = model.compute_loss(
+            points, features, lorentz_vectors, mask, track_labels,
+        )
+        assert torch.isfinite(loss_dict['total_loss']).all()
+        assert torch.isfinite(loss_dict['ranking_loss']).all()
+        assert torch.isfinite(loss_dict['reconstruction_loss']).all()
+
+    def test_gradients_flow(self):
+        """All parameters should receive gradients with extended input."""
+        model = TrackPreFilter(
+            mode='hybrid', input_dim=INPUT_DIM_EXTENDED,
+            hidden_dim=192, latent_dim=48, num_message_rounds=2,
+        )
+        points, features, lorentz_vectors, mask, track_labels = (
+            _make_extended_training_inputs()
+        )
+        loss_dict = model.compute_loss(
+            points, features, lorentz_vectors, mask, track_labels,
+        )
+        loss_dict['total_loss'].backward()
+
+        params_with_grad = sum(
+            1 for _, parameter in model.named_parameters()
+            if parameter.grad is not None and parameter.grad.abs().sum() > 0
+        )
+        total_params = sum(1 for _ in model.parameters())
+        # Allow 1 param with zero grad (numerical artifact from random data)
+        assert params_with_grad >= total_params - 1, (
+            f'Only {params_with_grad}/{total_params} params got gradients'
+        )
+
+    def test_param_count_increase(self):
+        """Wide192 with 13 features should have more params than wide128 with 7."""
+        model_old = TrackPreFilter(
+            mode='hybrid', input_dim=INPUT_DIM,
+            hidden_dim=128, latent_dim=32, num_message_rounds=2,
+        )
+        model_new = TrackPreFilter(
+            mode='hybrid', input_dim=INPUT_DIM_EXTENDED,
+            hidden_dim=192, latent_dim=48, num_message_rounds=2,
+        )
+        old_params = sum(p.numel() for p in model_old.parameters())
+        new_params = sum(p.numel() for p in model_new.parameters())
+        assert new_params > old_params, (
+            f'New model ({new_params}) should have more params than old ({old_params})'
         )

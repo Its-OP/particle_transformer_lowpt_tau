@@ -1,8 +1,11 @@
 """Network wrapper for TrackPreFilter (Stage 1 of two-stage pipeline).
 
-Default configuration: hybrid mode with hidden_dim=128,
-num_message_rounds=2, latent_dim=32, ranking_num_samples=50.
-Best discovered combination from hyperparameter sweep + SOTA denoising.
+Default configuration: hybrid mode with hidden_dim=192,
+num_message_rounds=2, latent_dim=48, ranking_num_samples=50.
+Widened from 128/32 to 192/48 to accommodate extended 13-feature input
+(was 7 features: px, py, pz, eta, phi, charge, dxy_significance;
+ now adds dz_significance, pt_error, n_valid_pixel_hits,
+ dca_significance, covariance_phi_phi, covariance_lambda_lambda).
 """
 
 from weaver.nn.model.TrackPreFilter import TrackPreFilter
@@ -10,7 +13,7 @@ from weaver.utils.logger import _logger
 
 
 def get_model(data_config, **kwargs):
-    """Build TrackPreFilter with default wide128+2rounds config."""
+    """Build TrackPreFilter with default wide192+2rounds config."""
     # Pop unused args from other heads
     for unused_arg in [
         'pretrained_backbone_path', 'backbone_mode',
@@ -28,8 +31,8 @@ def get_model(data_config, **kwargs):
     configuration = dict(
         mode='hybrid',
         input_dim=input_dim,
-        hidden_dim=128,
-        latent_dim=32,
+        hidden_dim=192,
+        latent_dim=48,
         num_neighbors=16,
         num_message_rounds=2,
         ranking_num_samples=50,

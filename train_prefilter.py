@@ -111,6 +111,8 @@ def train_one_epoch(
             loss_dict = model.compute_loss(
                 points, features, lorentz_vectors, mask, track_labels,
             )
+            # Remove cached scores (non-scalar) before loss accumulation
+            loss_dict.pop('_scores', None)
             loss = loss_dict['total_loss']
 
         if torch.isnan(loss) or torch.isinf(loss):

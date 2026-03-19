@@ -190,12 +190,11 @@ def train_one_epoch(
             loss_dict.pop('_per_track_logits', None)
             loss = loss_dict['total_loss']
 
-        # Skip batches with NaN/Inf loss
-        if torch.isnan(loss) or torch.isinf(loss):
+        # Single GPU→CPU sync instead of two (isnan + isinf)
+        if not torch.isfinite(loss).item():
             logger.warning(
                 f'Epoch {epoch} | Batch {batch_index} | '
-                f'Skipping batch with '
-                f'{"NaN" if torch.isnan(loss) else "Inf"} loss',
+                f'Skipping batch with non-finite loss',
             )
             optimizer.zero_grad(set_to_none=True)
             global_batch_count += 1
@@ -220,32 +219,25 @@ def train_one_epoch(
 
         scheduler.step_batch()
 
-        # Accumulate losses (initialize from first batch's keys)
+        # Accumulate losses on GPU to avoid per-batch GPU→CPU sync.
+        # Only transfer to CPU at logging intervals.
         if loss_accumulators is None:
-            loss_accumulators = {key: 0.0 for key in loss_dict}
+            loss_accumulators = {
+                key: torch.zeros(1, device=loss.device)
+                for key in loss_dict
+            }
         for key in loss_accumulators:
-            loss_accumulators[key] += loss_dict[key].item()
+            loss_accumulators[key] += loss_dict[key].detach()
         num_batches += 1
         global_batch_count += 1
 
-        # TensorBoard: per-batch logging
-        if tensorboard_writer is not None:
-            tensorboard_writer.add_scalar(
-                'Loss/train_batch', loss.item(), global_batch_count,
-            )
-            for key, value in loss_dict.items():
-                if key != 'total_loss':
-                    tensorboard_writer.add_scalar(
-                        f'Loss/{key}_batch', value.item(), global_batch_count,
-                    )
-            tensorboard_writer.add_scalar(
-                'LR/train', scheduler.get_last_lr()[0], global_batch_count,
-            )
-
+        # TensorBoard + console logging at intervals only (reduces GPU→CPU syncs)
         if batch_index % 20 == 0:
             elapsed = time.time() - start_time
             current_lr = scheduler.get_last_lr()[0]
-            avg_total = loss_accumulators['total_loss'] / max(1, num_batches)
+            avg_total = (
+                loss_accumulators['total_loss'].item() / max(1, num_batches)
+            )
             component_parts = ' | '.join(
                 f'{key.replace("_loss", "")}: {value.item():.5f}'
                 for key, value in loss_dict.items()
@@ -260,14 +252,28 @@ def train_one_epoch(
                 f'Time: {elapsed:.1f}s',
             )
 
+            if tensorboard_writer is not None:
+                tensorboard_writer.add_scalar(
+                    'Loss/train_batch', loss.item(), global_batch_count,
+                )
+                for key, value in loss_dict.items():
+                    if key != 'total_loss':
+                        tensorboard_writer.add_scalar(
+                            f'Loss/{key}_batch', value.item(),
+                            global_batch_count,
+                        )
+                tensorboard_writer.add_scalar(
+                    'LR/train', current_lr, global_batch_count,
+                )
+
         # Free batch tensors to reduce peak memory between iterations
         del inputs, model_inputs, track_labels, loss_dict, loss
 
-    # Average losses
+    # Average losses (transfer GPU tensors to CPU scalars)
     if loss_accumulators is None:
-        loss_accumulators = {'total_loss': 0.0}
+        loss_accumulators = {'total_loss': torch.zeros(1)}
     loss_averages = {
-        key: value / max(1, num_batches)
+        key: value.item() / max(1, num_batches)
         for key, value in loss_accumulators.items()
     }
     return loss_averages, global_batch_count

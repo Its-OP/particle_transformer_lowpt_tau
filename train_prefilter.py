@@ -115,11 +115,11 @@ def train_one_epoch(
             loss_dict.pop('_scores', None)
             loss = loss_dict['total_loss']
 
-        if torch.isnan(loss) or torch.isinf(loss):
+        # Single GPU→CPU sync instead of two (isnan + isinf)
+        if not torch.isfinite(loss).item():
             logger.warning(
                 f'Epoch {epoch} | Batch {batch_index} | '
-                f'Skipping batch with '
-                f'{"NaN" if torch.isnan(loss) else "Inf"} loss',
+                f'Skipping batch with non-finite loss',
             )
             optimizer.zero_grad(set_to_none=True)
             global_batch_count += 1
@@ -144,19 +144,25 @@ def train_one_epoch(
 
         scheduler.step_batch()
 
+        # Accumulate losses on GPU to avoid per-batch GPU→CPU sync.
+        # Only transfer to CPU at logging intervals.
         if loss_accumulators is None:
-            loss_accumulators = {key: 0.0 for key in loss_dict}
+            loss_accumulators = {
+                key: torch.zeros(1, device=loss.device)
+                for key in loss_dict
+            }
         for key in loss_accumulators:
-            loss_accumulators[key] += loss_dict[key].item()
+            loss_accumulators[key] += loss_dict[key].detach()
 
         num_batches += 1
         global_batch_count += 1
 
         if batch_index % 20 == 0:
             elapsed = time.time() - start_time
-            avg_loss = loss_accumulators['total_loss'] / num_batches
+            avg_loss = loss_accumulators['total_loss'].item() / num_batches
             components = ' | '.join(
-                f'{key.replace("_loss", "")}: {value / num_batches:.5f}'
+                f'{key.replace("_loss", "")}: '
+                f'{value.item() / num_batches:.5f}'
                 for key, value in loss_accumulators.items()
                 if key != 'total_loss'
             )
@@ -171,9 +177,9 @@ def train_one_epoch(
         del inputs, model_inputs, track_labels, loss_dict
 
     if loss_accumulators is None:
-        loss_accumulators = {'total_loss': 0.0}
+        loss_accumulators = {'total_loss': torch.zeros(1)}
     loss_averages = {
-        key: value / max(1, num_batches)
+        key: value.item() / max(1, num_batches)
         for key, value in loss_accumulators.items()
     }
 
@@ -549,11 +555,17 @@ def main():
                 grad_clip_max_norm=args.grad_clip,
             )
 
-            val_steps = max(1, steps_per_epoch // 4)
+            eval_steps = max(1, steps_per_epoch // 4)
+
             val_losses, val_metrics = validate(
                 model, val_loader, device, data_config,
                 mask_input_index, label_input_index,
-                max_steps=val_steps,
+                max_steps=eval_steps,
+            )
+            train_eval_losses, train_eval_metrics = validate(
+                model, train_loader, device, data_config,
+                mask_input_index, label_input_index,
+                max_steps=eval_steps,
             )
 
             val_loss = val_losses['total_loss']
@@ -562,14 +574,24 @@ def main():
                 best_val_loss = val_loss
                 best_val_epoch = epoch
 
-            perfect_200 = val_metrics.get('perfect_at_200', 0.0)
-            val_summary = (
-                f'R@30: {val_metrics["recall_at_30"]:.4f} | '
-                f'R@100: {val_metrics["recall_at_100"]:.4f} | '
-                f'R@200: {val_metrics["recall_at_200"]:.4f} | '
-                f'P@200: {perfect_200:.4f} | '
-                f'd\': {val_metrics["d_prime"]:.3f} | '
-                f'rank: {val_metrics["median_gt_rank"]:.0f}'
+            def _format_metrics(metrics):
+                perfect_200 = metrics.get('perfect_at_200', 0.0)
+                return (
+                    f'R@30: {metrics["recall_at_30"]:.4f} | '
+                    f'R@100: {metrics["recall_at_100"]:.4f} | '
+                    f'R@200: {metrics["recall_at_200"]:.4f} | '
+                    f'P@200: {perfect_200:.4f} | '
+                    f'd\': {metrics["d_prime"]:.3f} | '
+                    f'rank: {metrics["median_gt_rank"]:.0f}'
+                )
+
+            train_summary = _format_metrics(train_eval_metrics)
+            val_summary = _format_metrics(val_metrics)
+
+            logger.info(
+                f'Epoch {epoch} train_eval | '
+                f'total: {train_eval_losses["total_loss"]:.5f} | '
+                f'{train_summary}',
             )
             if is_best:
                 logger.info(
@@ -605,7 +627,13 @@ def main():
                 if metric_key == 'total_gt_tracks':
                     continue
                 tensorboard_writer.add_scalar(
-                    f'Metrics/{metric_key}', metric_value, epoch,
+                    f'Metrics/val_{metric_key}', metric_value, epoch,
+                )
+            for metric_key, metric_value in train_eval_metrics.items():
+                if metric_key == 'total_gt_tracks':
+                    continue
+                tensorboard_writer.add_scalar(
+                    f'Metrics/train_{metric_key}', metric_value, epoch,
                 )
             tensorboard_writer.add_scalar('LR/epoch', current_lr, epoch)
 
@@ -620,12 +648,14 @@ def main():
                 if short_key not in loss_history:
                     loss_history[short_key] = []
                 loss_history[short_key].append(value)
-            for metric_key, metric_value in val_metrics.items():
-                if metric_key == 'total_gt_tracks':
-                    continue
-                if metric_key not in loss_history:
-                    loss_history[metric_key] = []
-                loss_history[metric_key].append(metric_value)
+            for prefix, metrics in [('val', val_metrics), ('train', train_eval_metrics)]:
+                for metric_key, metric_value in metrics.items():
+                    if metric_key == 'total_gt_tracks':
+                        continue
+                    history_key = f'{prefix}_{metric_key}'
+                    if history_key not in loss_history:
+                        loss_history[history_key] = []
+                    loss_history[history_key].append(metric_value)
             save_loss_history(loss_history, experiment_dir)
 
             # Checkpointing

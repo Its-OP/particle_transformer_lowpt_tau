@@ -7,6 +7,7 @@ numpy
 awkward
 uproot
 vector
+duckdb
 
 --extra-index-url https://download.pytorch.org/whl/cu129
 torch

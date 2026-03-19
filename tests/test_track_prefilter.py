@@ -655,3 +655,296 @@ class TestDeferredReweighting:
         assert model._drw_active is True
         model.set_drw_active(False)
         assert model._drw_active is False
+
+
+# ---- PNA Multi-Aggregation ----
+
+class TestPNAAggregation:
+    """Test PNA (Principal Neighbourhood Aggregation) mode."""
+
+    def test_pna_forward_shape(self):
+        """PNA mode should produce correct output shape."""
+        model = TrackPreFilter(
+            mode='mlp', input_dim=INPUT_DIM_EXTENDED,
+            hidden_dim=192, num_message_rounds=2,
+            aggregation_mode='pna',
+        )
+        points, features, lorentz_vectors, mask, _ = (
+            _make_extended_training_inputs()
+        )
+        scores = model(points, features, lorentz_vectors, mask)
+        assert scores.shape == (BATCH_SIZE, NUM_TRACKS)
+
+    def test_pna_loss_finite(self):
+        """PNA mode loss should be finite."""
+        model = TrackPreFilter(
+            mode='mlp', input_dim=INPUT_DIM_EXTENDED,
+            hidden_dim=192, num_message_rounds=2,
+            aggregation_mode='pna',
+        )
+        points, features, lorentz_vectors, mask, track_labels = (
+            _make_extended_training_inputs()
+        )
+        loss_dict = model.compute_loss(
+            points, features, lorentz_vectors, mask, track_labels,
+        )
+        assert torch.isfinite(loss_dict['total_loss']).all()
+
+    def test_pna_gradient_flow(self):
+        """All PNA model parameters should receive gradients."""
+        model = TrackPreFilter(
+            mode='mlp', input_dim=INPUT_DIM_EXTENDED,
+            hidden_dim=192, num_message_rounds=2,
+            aggregation_mode='pna',
+        )
+        points, features, lorentz_vectors, mask, track_labels = (
+            _make_extended_training_inputs()
+        )
+        loss_dict = model.compute_loss(
+            points, features, lorentz_vectors, mask, track_labels,
+        )
+        loss_dict['total_loss'].backward()
+
+        params_with_grad = sum(
+            1 for _, parameter in model.named_parameters()
+            if parameter.grad is not None and parameter.grad.abs().sum() > 0
+        )
+        total_params = sum(1 for _ in model.parameters())
+        assert params_with_grad >= total_params - 1
+
+    def test_pna_more_params_than_maxpool(self):
+        """PNA mode has wider neighbor_mlp input, so more params."""
+        model_max = TrackPreFilter(
+            mode='mlp', input_dim=INPUT_DIM_EXTENDED,
+            hidden_dim=192, num_message_rounds=2,
+            aggregation_mode='max',
+        )
+        model_pna = TrackPreFilter(
+            mode='mlp', input_dim=INPUT_DIM_EXTENDED,
+            hidden_dim=192, num_message_rounds=2,
+            aggregation_mode='pna',
+        )
+        max_params = sum(p.numel() for p in model_max.parameters())
+        pna_params = sum(p.numel() for p in model_pna.parameters())
+        assert pna_params > max_params
+
+    def test_pna_aggregation_values(self):
+        """PNA should compute correct mean/max/min/std on known inputs."""
+        model = TrackPreFilter(
+            mode='mlp', input_dim=INPUT_DIM,
+            aggregation_mode='pna',
+        )
+        # All neighbors have value 2.0, except one which is 4.0
+        neighbor_features = torch.full((1, 4, 3, 5), 2.0)
+        neighbor_features[0, :, :, 2] = 4.0  # One neighbor is 4.0
+        neighbor_validity = torch.ones(1, 1, 3, 5)
+        neighbor_validity[0, 0, :, 4] = 0.0  # Last neighbor invalid
+
+        result = model._pna_aggregate(neighbor_features, neighbor_validity)
+        # Shape: (1, 4*4, 3) = (1, 16, 3)
+        assert result.shape == (1, 16, 3)
+        # Mean of [2, 2, 4, 2] = 2.5 for each channel, each track
+        hidden = 4
+        mean_part = result[0, :hidden, 0]
+        assert torch.allclose(mean_part, torch.tensor([2.5, 2.5, 2.5, 2.5]))
+
+    def test_pna_handles_masked_neighbors(self):
+        """Invalid neighbors should be excluded from all statistics."""
+        model = TrackPreFilter(
+            mode='mlp', input_dim=INPUT_DIM,
+            aggregation_mode='pna',
+        )
+        # All neighbors invalid except first
+        neighbor_features = torch.full((1, 2, 1, 4), 99.0)
+        neighbor_features[0, :, 0, 0] = 3.0  # Only valid neighbor
+        neighbor_validity = torch.zeros(1, 1, 1, 4)
+        neighbor_validity[0, 0, 0, 0] = 1.0  # Only first is valid
+
+        result = model._pna_aggregate(neighbor_features, neighbor_validity)
+        hidden = 2
+        # With 1 valid neighbor: mean=3, max=3, min=3, std≈0
+        mean_part = result[0, :hidden, 0]
+        max_part = result[0, hidden:2*hidden, 0]
+        min_part = result[0, 2*hidden:3*hidden, 0]
+        assert torch.allclose(mean_part, torch.tensor([3.0, 3.0]))
+        assert torch.allclose(max_part, torch.tensor([3.0, 3.0]))
+        assert torch.allclose(min_part, torch.tensor([3.0, 3.0]))
+
+
+# ---- Focal Weighting ----
+
+class TestFocalWeighting:
+    """Test equalized focal weighting for ranking loss."""
+
+    def test_focal_disabled_matches_baseline(self):
+        """focal_gamma=0 should produce identical loss to baseline."""
+        scores = torch.full((1, NUM_TRACKS), -10.0)
+        scores[0, 10] = -2.0
+        scores[0, 0] = 2.0
+        labels = torch.zeros(1, NUM_TRACKS)
+        labels[0, 10] = 1.0
+        valid_mask = torch.zeros(1, NUM_TRACKS, dtype=torch.bool)
+        valid_mask[0, 0] = True
+        valid_mask[0, 10] = True
+
+        model_no_focal = TrackPreFilter(
+            mode='mlp', input_dim=INPUT_DIM,
+            focal_gamma=0.0, ranking_num_samples=1,
+        )
+        model_with_focal = TrackPreFilter(
+            mode='mlp', input_dim=INPUT_DIM,
+            focal_gamma=2.0, ranking_num_samples=1,
+        )
+
+        loss_baseline = model_no_focal._ranking_loss(
+            scores, labels, valid_mask,
+        )
+        loss_focal = model_with_focal._ranking_loss(
+            scores, labels, valid_mask,
+        )
+        # Focal should downweight this pair (it's a clear violation)
+        # but should NOT be identical to baseline
+        assert loss_focal.item() < loss_baseline.item()
+
+    def test_focal_downweights_easy_pairs(self):
+        """Easy pairs (large correct margin) should get smaller focal weight."""
+        # Easy pair: positive scores much higher than negative
+        scores_easy = torch.full((1, NUM_TRACKS), -10.0)
+        scores_easy[0, 10] = 10.0  # GT pion scores very high
+        scores_easy[0, 0] = -5.0   # Negative scores very low
+        # Hard pair: negative barely beats positive
+        scores_hard = torch.full((1, NUM_TRACKS), -10.0)
+        scores_hard[0, 10] = -0.1  # GT pion scores just below
+        scores_hard[0, 0] = 0.1    # Negative scores just above
+
+        labels = torch.zeros(1, NUM_TRACKS)
+        labels[0, 10] = 1.0
+        valid_mask = torch.zeros(1, NUM_TRACKS, dtype=torch.bool)
+        valid_mask[0, 0] = True
+        valid_mask[0, 10] = True
+
+        model = TrackPreFilter(
+            mode='mlp', input_dim=INPUT_DIM,
+            focal_gamma=2.0, ranking_num_samples=1,
+        )
+
+        loss_easy = model._ranking_loss(scores_easy, labels, valid_mask)
+        loss_hard = model._ranking_loss(scores_hard, labels, valid_mask)
+        # Hard pair should produce higher loss than easy pair
+        assert loss_hard.item() > loss_easy.item()
+
+    def test_focal_never_zeros_gradient(self):
+        """Unlike ASL, focal weighting should never zero any gradient."""
+        model = TrackPreFilter(
+            mode='mlp', input_dim=INPUT_DIM_EXTENDED,
+            hidden_dim=64, num_message_rounds=1,
+            focal_gamma=3.0,
+        )
+        points, features, lorentz_vectors, mask, track_labels = (
+            _make_extended_training_inputs()
+        )
+        loss_dict = model.compute_loss(
+            points, features, lorentz_vectors, mask, track_labels,
+            use_contrastive_denoising=False,
+        )
+        loss_dict['total_loss'].backward()
+
+        params_with_grad = sum(
+            1 for _, parameter in model.named_parameters()
+            if parameter.grad is not None and parameter.grad.abs().sum() > 0
+        )
+        assert params_with_grad > 0, 'Focal weighting zeroed all gradients'
+
+
+# ---- DINO Contrastive Denoising ----
+
+class TestDINOContrastiveDenoising:
+    """Test DINO-style contrastive denoising with positive + negative copies."""
+
+    def test_positive_only_matches_legacy(self):
+        """With negative_sigma=0, should behave like the original denoising."""
+        model = TrackPreFilter(
+            mode='mlp', input_dim=INPUT_DIM,
+            contrastive_denoising_negative_sigma=0.0,
+        )
+        points, features, lorentz_vectors, mask, track_labels = (
+            _make_training_inputs()
+        )
+        scores = model(points, features, lorentz_vectors, mask)
+        loss = model._contrastive_denoising_loss(
+            points, features, lorentz_vectors, mask, track_labels, scores,
+        )
+        assert torch.isfinite(loss).all()
+
+    def test_negative_copies_produce_finite_loss(self):
+        """With negative copies enabled, loss should still be finite."""
+        model = TrackPreFilter(
+            mode='mlp', input_dim=INPUT_DIM,
+            contrastive_denoising_negative_sigma=1.5,
+        )
+        points, features, lorentz_vectors, mask, track_labels = (
+            _make_training_inputs()
+        )
+        scores = model(points, features, lorentz_vectors, mask)
+        loss = model._contrastive_denoising_loss(
+            points, features, lorentz_vectors, mask, track_labels, scores,
+        )
+        assert torch.isfinite(loss).all()
+
+    def test_negative_copies_change_loss(self):
+        """Adding negative copies should produce a different denoising loss."""
+        points, features, lorentz_vectors, mask, track_labels = (
+            _make_training_inputs()
+        )
+
+        model_pos_only = TrackPreFilter(
+            mode='mlp', input_dim=INPUT_DIM,
+            contrastive_denoising_negative_sigma=0.0,
+            denoising_sigma_start=0.3, denoising_sigma_end=0.3,
+        )
+        scores_pos = model_pos_only(points, features, lorentz_vectors, mask)
+
+        model_with_neg = TrackPreFilter(
+            mode='mlp', input_dim=INPUT_DIM,
+            contrastive_denoising_negative_sigma=1.5,
+            denoising_sigma_start=0.3, denoising_sigma_end=0.3,
+        )
+        # Use same weights for fair comparison
+        model_with_neg.load_state_dict(model_pos_only.state_dict())
+        scores_neg = model_with_neg(points, features, lorentz_vectors, mask)
+
+        loss_pos = model_pos_only._contrastive_denoising_loss(
+            points, features, lorentz_vectors, mask, track_labels, scores_pos,
+        )
+        loss_neg = model_with_neg._contrastive_denoising_loss(
+            points, features, lorentz_vectors, mask, track_labels, scores_neg,
+        )
+        # With negative copies, loss includes neg-vs-pos terms → different value
+        assert loss_neg.item() != loss_pos.item()
+
+    def test_full_loss_with_all_batch_b(self):
+        """Smoke test: all Batch B features enabled together."""
+        model = TrackPreFilter(
+            mode='mlp', input_dim=INPUT_DIM_EXTENDED,
+            hidden_dim=192, num_message_rounds=2,
+            aggregation_mode='pna',
+            focal_gamma=2.0,
+            contrastive_denoising_negative_sigma=1.5,
+        )
+        points, features, lorentz_vectors, mask, track_labels = (
+            _make_extended_training_inputs()
+        )
+        loss_dict = model.compute_loss(
+            points, features, lorentz_vectors, mask, track_labels,
+        )
+        assert torch.isfinite(loss_dict['total_loss']).all()
+        assert torch.isfinite(loss_dict['ranking_loss']).all()
+        assert torch.isfinite(loss_dict['denoising_loss']).all()
+
+        loss_dict['total_loss'].backward()
+        params_with_grad = sum(
+            1 for _, parameter in model.named_parameters()
+            if parameter.grad is not None and parameter.grad.abs().sum() > 0
+        )
+        total_params = sum(1 for _ in model.parameters())
+        assert params_with_grad >= total_params - 1

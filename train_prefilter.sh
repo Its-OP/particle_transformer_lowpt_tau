@@ -19,6 +19,18 @@
 # =============================================================================
 set -euo pipefail
 
+# ---- Check data split ----
+SCRIPT_DIR_CHECK="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TRAIN_PARQUET_COUNT=$(ls "${SCRIPT_DIR_CHECK}"/data/low-pt/train/*.parquet 2>/dev/null | wc -l | tr -d ' ')
+VAL_PARQUET_COUNT=$(ls "${SCRIPT_DIR_CHECK}"/data/low-pt/val/*.parquet 2>/dev/null | wc -l | tr -d ' ')
+if [ "$TRAIN_PARQUET_COUNT" -lt 10 ] || [ "$VAL_PARQUET_COUNT" -lt 10 ]; then
+    echo "WARNING: Found ${TRAIN_PARQUET_COUNT} train and ${VAL_PARQUET_COUNT} val parquet files."
+    echo "  Expected 10+ files each for multi-worker loading."
+    echo "  Run: python utils/split_parquet.py data/low-pt/train/train.parquet --num-parts 10"
+    echo "  Or:  bash setup_data.sh"
+fi
+echo "Found ${TRAIN_PARQUET_COUNT} train parquet files, ${VAL_PARQUET_COUNT} val parquet files."
+
 # ---- Configuration ----
 SESSION_TRAIN="prefilter_train"
 SESSION_GPU="prefilter_gpu"
@@ -37,7 +49,7 @@ LEARNING_RATE=1e-3
 SCHEDULER="cosine"
 DEVICE="cuda:0"
 STEPS_PER_EPOCH=500
-NUM_WORKERS=4
+NUM_WORKERS=10
 NO_COMPILE=false
 KEEP_BEST_K=5
 

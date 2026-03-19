@@ -291,7 +291,12 @@ def main():
     parser.add_argument('--plateau-patience', type=int, default=5)
     parser.add_argument('--min-lr', type=float, default=1e-6)
     parser.add_argument('--grad-clip', type=float, default=1.0)
-    parser.add_argument('--train-fraction', type=float, default=0.8)
+    parser.add_argument('--train-fraction', type=float, default=0.8,
+                        help='Fraction of data-dir for training (ignored if --val-data-dir set)')
+    parser.add_argument('--val-data-dir', type=str, default=None,
+                        help='Separate directory with validation parquet files. '
+                             'When set, data-dir is used entirely for training '
+                             'and val-data-dir entirely for validation.')
     parser.add_argument('--num-workers', type=int, default=4)
     parser.add_argument('--device', type=str, default='cuda:0')
     parser.add_argument('--amp', action='store_true')
@@ -331,33 +336,48 @@ def main():
 
     # ---- Data loading ----
     import glob
-    parquet_files = sorted(glob.glob(f'{args.data_dir}/*.parquet'))
-    logger.info(f'Found {len(parquet_files)} parquet files')
-
-    file_dict = {'data': parquet_files}
-    num_parquet_files = len(parquet_files)
-    train_num_workers = min(args.num_workers, num_parquet_files)
-
     load_in_memory = not args.no_in_memory
 
+    train_parquet_files = sorted(glob.glob(f'{args.data_dir}/*.parquet'))
+    logger.info(f'Found {len(train_parquet_files)} train parquet files in {args.data_dir}')
+    train_file_dict = {'data': train_parquet_files}
+    num_train_files = len(train_parquet_files)
+
+    if args.val_data_dir is not None:
+        # Separate train/val directories — use each entirely
+        val_parquet_files = sorted(glob.glob(f'{args.val_data_dir}/*.parquet'))
+        logger.info(f'Found {len(val_parquet_files)} val parquet files in {args.val_data_dir}')
+        val_file_dict = {'data': val_parquet_files}
+        num_val_files = len(val_parquet_files)
+        train_range = ((0.0, 1.0), 1.0)
+        val_range = ((0.0, 1.0), 1.0)
+    else:
+        # Single directory — split by train_fraction
+        val_file_dict = train_file_dict
+        num_val_files = num_train_files
+        train_range = ((0.0, args.train_fraction), 1.0)
+        val_range = ((args.train_fraction, 1.0), 1.0)
+
+    train_num_workers = min(args.num_workers, num_train_files)
+
     train_dataset = SimpleIterDataset(
-        file_dict,
+        train_file_dict,
         data_config_file=args.data_config,
         for_training=True,
-        load_range_and_fraction=((0.0, args.train_fraction), 1.0),
+        load_range_and_fraction=train_range,
         fetch_by_files=True,
-        fetch_step=num_parquet_files,
+        fetch_step=num_train_files,
         in_memory=load_in_memory,
     )
     data_config = train_dataset.config
 
     val_dataset = SimpleIterDataset(
-        file_dict,
+        val_file_dict,
         data_config_file=args.data_config,
         for_training=False,
-        load_range_and_fraction=((args.train_fraction, 1.0), 1.0),
+        load_range_and_fraction=val_range,
         fetch_by_files=True,
-        fetch_step=num_parquet_files,
+        fetch_step=num_val_files,
         in_memory=load_in_memory,
     )
 
@@ -370,7 +390,7 @@ def main():
         persistent_workers=train_num_workers > 0,
     )
     val_num_workers = min(
-        max(1, train_num_workers // 2), num_parquet_files,
+        max(1, train_num_workers // 2), num_val_files,
     ) if train_num_workers > 0 else 0
     val_loader = DataLoader(
         val_dataset,

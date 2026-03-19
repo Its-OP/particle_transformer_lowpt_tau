@@ -41,11 +41,11 @@ MODEL_NAME="TrackFinderV3"
 EXPERIMENTS_DIR="experiments"
 PRETRAINED_BACKBONE="models/backbone_best.pt"
 EPOCHS=50
-BATCH_SIZE=64
+BATCH_SIZE=128
 LEARNING_RATE=1e-4
 SCHEDULER="cosine"
 DEVICE="cuda:0"
-STEPS_PER_EPOCH=500
+STEPS_PER_EPOCH=350
 NUM_WORKERS=4
 NO_COMPILE=false
 # DETR loss weights (only used with DETR head; ignored by V2 and OC wrappers)

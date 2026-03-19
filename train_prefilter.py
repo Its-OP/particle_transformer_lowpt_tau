@@ -524,6 +524,23 @@ def main():
         for epoch in range(start_epoch, args.epochs + 1):
             logger.info(f'=== Epoch {epoch}/{args.epochs} ===')
 
+            # --- Epoch-dependent training schedule updates ---
+            temperature_progress = (epoch - 1) / max(1, args.epochs - 1)
+            original_model.set_temperature_progress(temperature_progress)
+
+            drw_warmup_epochs = int(
+                args.epochs * original_model.drw_warmup_fraction,
+            )
+            drw_now_active = epoch > drw_warmup_epochs
+            original_model.set_drw_active(drw_now_active)
+
+            logger.info(
+                f'Schedule | T={original_model.current_ranking_temperature:.3f}'
+                f' | σ={original_model.current_denoising_sigma:.3f}'
+                f' | DRW={"ON" if drw_now_active else "off"}'
+                f' (warmup={drw_warmup_epochs})',
+            )
+
             train_losses, global_batch_count = train_one_epoch(
                 model, train_loader, optimizer, scheduler,
                 grad_scaler, device, data_config, epoch,

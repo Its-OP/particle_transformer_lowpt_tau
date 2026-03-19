@@ -328,8 +328,11 @@ class TestGAPLayer:
         mask = torch.ones(BATCH_SIZE, 1, NUM_TRACKS, dtype=torch.bool)
 
         # Get MIA attention weights: (B, encoding_dim, P, K)
-        attention_weights = layer.compute_mia_attention_weights(
-            features, neighbor_indices, mask,
+        # Also returns encoded_edges and neighbor_validity (for reuse in _forward_mia)
+        attention_weights, _encoded_edges, _neighbor_validity = (
+            layer.compute_mia_attention_weights(
+                features, neighbor_indices, mask,
+            )
         )
 
         # Each channel should sum to 1 over K for valid nodes

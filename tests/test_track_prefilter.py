@@ -416,3 +416,242 @@ class TestExtendedHybridMode:
         assert new_params > old_params, (
             f'New model ({new_params}) should have more params than old ({old_params})'
         )
+
+
+# ---- MLP Mode with Multi-Round Message Passing ----
+
+class TestMLPMultiRound:
+    """Test MLP mode with multiple kNN message-passing rounds."""
+
+    def test_multi_round_forward_shape(self):
+        """MLP mode with 2 message rounds produces correct output shape."""
+        model = TrackPreFilter(
+            mode='mlp', input_dim=INPUT_DIM_EXTENDED,
+            hidden_dim=192, num_message_rounds=2,
+        )
+        points, features, lorentz_vectors, mask, _ = (
+            _make_extended_training_inputs()
+        )
+        scores = model(points, features, lorentz_vectors, mask)
+        assert scores.shape == (BATCH_SIZE, NUM_TRACKS)
+
+    def test_multi_round_loss_finite(self):
+        """Loss should be finite with multi-round MLP (no reconstruction loss)."""
+        model = TrackPreFilter(
+            mode='mlp', input_dim=INPUT_DIM_EXTENDED,
+            hidden_dim=192, num_message_rounds=2,
+        )
+        points, features, lorentz_vectors, mask, track_labels = (
+            _make_extended_training_inputs()
+        )
+        loss_dict = model.compute_loss(
+            points, features, lorentz_vectors, mask, track_labels,
+        )
+        assert torch.isfinite(loss_dict['total_loss']).all()
+        assert torch.isfinite(loss_dict['ranking_loss']).all()
+        assert 'reconstruction_loss' not in loss_dict
+
+    def test_fewer_params_than_hybrid(self):
+        """MLP mode (no AE) should have fewer params than hybrid mode."""
+        model_mlp = TrackPreFilter(
+            mode='mlp', input_dim=INPUT_DIM_EXTENDED,
+            hidden_dim=192, num_message_rounds=2,
+        )
+        model_hybrid = TrackPreFilter(
+            mode='hybrid', input_dim=INPUT_DIM_EXTENDED,
+            hidden_dim=192, latent_dim=48, num_message_rounds=2,
+        )
+        mlp_params = sum(p.numel() for p in model_mlp.parameters())
+        hybrid_params = sum(p.numel() for p in model_hybrid.parameters())
+        assert mlp_params < hybrid_params, (
+            f'MLP ({mlp_params}) should have fewer params than '
+            f'hybrid ({hybrid_params})'
+        )
+
+    def test_single_round_backward_compat(self):
+        """MLP mode with 1 round should still work (backward compat)."""
+        model = TrackPreFilter(
+            mode='mlp', input_dim=INPUT_DIM, num_message_rounds=1,
+        )
+        points, features, lorentz_vectors, mask, _ = (
+            _make_training_inputs()
+        )
+        scores = model(points, features, lorentz_vectors, mask)
+        assert scores.shape == (BATCH_SIZE, NUM_TRACKS)
+
+    def test_gradient_flow(self):
+        """All parameters should receive gradients in multi-round MLP."""
+        model = TrackPreFilter(
+            mode='mlp', input_dim=INPUT_DIM_EXTENDED,
+            hidden_dim=192, num_message_rounds=2,
+        )
+        points, features, lorentz_vectors, mask, track_labels = (
+            _make_extended_training_inputs()
+        )
+        loss_dict = model.compute_loss(
+            points, features, lorentz_vectors, mask, track_labels,
+        )
+        loss_dict['total_loss'].backward()
+
+        params_with_grad = sum(
+            1 for _, parameter in model.named_parameters()
+            if parameter.grad is not None and parameter.grad.abs().sum() > 0
+        )
+        total_params = sum(1 for _ in model.parameters())
+        assert params_with_grad >= total_params - 1, (
+            f'Only {params_with_grad}/{total_params} params got gradients'
+        )
+
+
+# ---- Temperature Scheduling ----
+
+class TestTemperatureScheduling:
+    """Test temperature and sigma scheduling for ranking/denoising losses."""
+
+    def test_sigma_interpolation(self):
+        """Denoising sigma should interpolate linearly with progress."""
+        model = TrackPreFilter(
+            mode='mlp', input_dim=INPUT_DIM,
+            denoising_sigma_start=1.0, denoising_sigma_end=0.1,
+        )
+        model.set_temperature_progress(0.0)
+        assert abs(model.current_denoising_sigma - 1.0) < 1e-6
+
+        model.set_temperature_progress(0.5)
+        assert abs(model.current_denoising_sigma - 0.55) < 1e-6
+
+        model.set_temperature_progress(1.0)
+        assert abs(model.current_denoising_sigma - 0.1) < 1e-6
+
+    def test_temperature_interpolation(self):
+        """Ranking temperature should interpolate linearly with progress."""
+        model = TrackPreFilter(
+            mode='mlp', input_dim=INPUT_DIM,
+            ranking_temperature_start=2.0, ranking_temperature_end=0.5,
+        )
+        model.set_temperature_progress(0.0)
+        assert abs(model.current_ranking_temperature - 2.0) < 1e-6
+
+        model.set_temperature_progress(1.0)
+        assert abs(model.current_ranking_temperature - 0.5) < 1e-6
+
+    def test_temperature_affects_loss_magnitude(self):
+        """T * softplus(x/T) is monotonically increasing in T for fixed x > 0.
+
+        Higher T spreads gradients across more pairs (smoother loss landscape).
+        Lower T concentrates gradients on hard violations (sharper boundary).
+        """
+        # Use uniform negative scores so random sampling doesn't matter
+        scores = torch.full((1, NUM_TRACKS), -5.0)
+        scores[0, 10] = -0.5  # GT pion scores low
+        scores[0, :10] = 0.5  # All negatives score equally at 0.5
+        labels = torch.zeros(1, NUM_TRACKS)
+        labels[0, 10] = 1.0
+        valid_mask = torch.ones(1, NUM_TRACKS, dtype=torch.bool)
+        valid_mask[0, 11:] = False  # Only 11 valid tracks
+
+        model = TrackPreFilter(
+            mode='mlp', input_dim=INPUT_DIM,
+            ranking_temperature_start=2.0, ranking_temperature_end=2.0,
+        )
+        loss_high_temp = model._ranking_loss(scores, labels, valid_mask)
+
+        model_low = TrackPreFilter(
+            mode='mlp', input_dim=INPUT_DIM,
+            ranking_temperature_start=0.5, ranking_temperature_end=0.5,
+        )
+        loss_low_temp = model_low._ranking_loss(scores, labels, valid_mask)
+
+        # T * softplus(x/T) increases with T for x > 0
+        assert loss_high_temp.item() > loss_low_temp.item()
+
+    def test_default_temperature_matches_baseline(self):
+        """Default temperature (T=1) should match original softplus exactly."""
+        # Use uniform negatives to eliminate randomness from sampling
+        scores = torch.full((1, NUM_TRACKS), -10.0)
+        scores[0, 10] = -3.0  # GT pion
+        scores[0, 0] = 3.0    # Single negative
+        labels = torch.zeros(1, NUM_TRACKS)
+        labels[0, 10] = 1.0
+        valid_mask = torch.zeros(1, NUM_TRACKS, dtype=torch.bool)
+        valid_mask[0, 0] = True   # 1 valid negative
+        valid_mask[0, 10] = True  # 1 valid positive
+
+        model = TrackPreFilter(
+            mode='mlp', input_dim=INPUT_DIM,
+            ranking_temperature_start=1.0, ranking_temperature_end=1.0,
+            ranking_num_samples=1,
+        )
+        loss = model._ranking_loss(scores, labels, valid_mask)
+        # 1 * softplus((3.0 - (-3.0)) / 1) = softplus(6.0) ≈ 6.0025
+        expected = torch.nn.functional.softplus(torch.tensor(6.0)).item()
+        assert abs(loss.item() - expected) < 0.01
+
+
+# ---- Deferred Re-Weighting ----
+
+class TestDeferredReweighting:
+    """Test DRW (Deferred Re-Weighting) for ranking loss."""
+
+    def test_drw_inactive_matches_baseline(self):
+        """With DRW inactive, loss should match a weight=1.0 model exactly."""
+        # Use uniform negatives to eliminate randomness from sampling
+        scores = torch.full((1, NUM_TRACKS), -10.0)
+        scores[0, 10] = -2.0  # GT pion
+        scores[0, 0] = 2.0    # Single negative
+        labels = torch.zeros(1, NUM_TRACKS)
+        labels[0, 10] = 1.0
+        valid_mask = torch.zeros(1, NUM_TRACKS, dtype=torch.bool)
+        valid_mask[0, 0] = True
+        valid_mask[0, 10] = True
+
+        model = TrackPreFilter(
+            mode='mlp', input_dim=INPUT_DIM,
+            drw_positive_weight=3.0, ranking_num_samples=1,
+        )
+        model.set_drw_active(False)
+        loss_inactive = model._ranking_loss(scores, labels, valid_mask)
+
+        model_baseline = TrackPreFilter(
+            mode='mlp', input_dim=INPUT_DIM,
+            drw_positive_weight=1.0, ranking_num_samples=1,
+        )
+        loss_baseline = model_baseline._ranking_loss(
+            scores, labels, valid_mask,
+        )
+        assert abs(loss_inactive.item() - loss_baseline.item()) < 1e-5
+
+    def test_drw_active_scales_loss(self):
+        """With DRW active, loss should scale by positive weight."""
+        # Use uniform negatives to eliminate randomness from sampling
+        scores = torch.full((1, NUM_TRACKS), -10.0)
+        scores[0, 10] = -2.0  # GT pion
+        scores[0, 0] = 2.0    # Single negative
+        labels = torch.zeros(1, NUM_TRACKS)
+        labels[0, 10] = 1.0
+        valid_mask = torch.zeros(1, NUM_TRACKS, dtype=torch.bool)
+        valid_mask[0, 0] = True
+        valid_mask[0, 10] = True
+
+        weight = 3.0
+        model = TrackPreFilter(
+            mode='mlp', input_dim=INPUT_DIM,
+            drw_positive_weight=weight, ranking_num_samples=1,
+        )
+
+        model.set_drw_active(False)
+        loss_baseline = model._ranking_loss(scores, labels, valid_mask)
+
+        model.set_drw_active(True)
+        loss_reweighted = model._ranking_loss(scores, labels, valid_mask)
+
+        assert abs(loss_reweighted.item() - weight * loss_baseline.item()) < 1e-4
+
+    def test_drw_toggle(self):
+        """DRW state should toggle correctly."""
+        model = TrackPreFilter(mode='mlp', input_dim=INPUT_DIM)
+        assert model._drw_active is False
+        model.set_drw_active(True)
+        assert model._drw_active is True
+        model.set_drw_active(False)
+        assert model._drw_active is False

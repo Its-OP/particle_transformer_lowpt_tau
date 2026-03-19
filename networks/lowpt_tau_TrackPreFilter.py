@@ -1,11 +1,14 @@
 """Network wrapper for TrackPreFilter (Stage 1 of two-stage pipeline).
 
-Default configuration: hybrid mode with hidden_dim=192,
-num_message_rounds=2, latent_dim=48, ranking_num_samples=50.
-Widened from 128/32 to 192/48 to accommodate extended 13-feature input
-(was 7 features: px, py, pz, eta, phi, charge, dxy_significance;
- now adds dz_significance, pt_error, n_valid_pixel_hits,
- dca_significance, covariance_phi_phi, covariance_lambda_lambda).
+Default configuration: MLP mode with hidden_dim=192,
+num_message_rounds=2, ranking_num_samples=50.
+Autoencoder removed — with 13-dim input and 48-dim latent (3.7× wider),
+reconstruction was trivially solvable and added no discriminative value.
+
+Training improvements:
+- Temperature-scheduled ranking loss (high T → low T over training)
+- Temperature-scheduled denoising sigma (large noise → small noise)
+- Deferred Re-Weighting: uniform weights first, then upweight positives
 """
 
 from weaver.nn.model.TrackPreFilter import TrackPreFilter
@@ -29,13 +32,23 @@ def get_model(data_config, **kwargs):
     input_dim = len(data_config.input_dicts['pf_features'])
 
     configuration = dict(
-        mode='hybrid',
+        mode='mlp',
         input_dim=input_dim,
         hidden_dim=192,
-        latent_dim=48,
         num_neighbors=16,
         num_message_rounds=2,
         ranking_num_samples=50,
+        # Temperature scheduling (Kukleva et al., ICLR 2023):
+        # Ranking temperature: high → low (smooth gradients first, then sharp)
+        ranking_temperature_start=2.0,
+        ranking_temperature_end=0.5,
+        # Denoising sigma: large → small (easy positives first, then hard)
+        denoising_sigma_start=1.0,
+        denoising_sigma_end=0.1,
+        # Deferred Re-Weighting (Cao et al., NeurIPS 2019):
+        # Uniform weights for 30% of training, then 2× upweight positives
+        drw_warmup_fraction=0.3,
+        drw_positive_weight=2.0,
     )
     configuration.update(**kwargs)
     _logger.info('TrackPreFilter config: %s' % str(configuration))

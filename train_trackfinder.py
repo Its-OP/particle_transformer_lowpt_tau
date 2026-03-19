@@ -636,6 +636,10 @@ def main():
                         help='Path to YAML data config')
     parser.add_argument('--data-dir', type=str, required=True,
                         help='Directory containing parquet files')
+    parser.add_argument('--val-data-dir', type=str, default=None,
+                        help='Separate directory for validation parquet files. '
+                             'When set, data-dir is used entirely for training '
+                             'and val-data-dir entirely for validation.')
     parser.add_argument('--network', type=str, required=True,
                         help='Path to network wrapper Python file')
     parser.add_argument('--pretrained-backbone', type=str, default=None,
@@ -747,19 +751,36 @@ def main():
     tensorboard_writer = SummaryWriter(log_dir=tensorboard_dir)
 
     # ---- Data loading ----
-    parquet_files = sorted([
+    train_parquet_files = sorted([
         os.path.join(args.data_dir, f)
         for f in os.listdir(args.data_dir)
         if f.endswith('.parquet')
     ])
-    if not parquet_files:
+    if not train_parquet_files:
         raise FileNotFoundError(
             f'No parquet files found in {args.data_dir}',
         )
-    logger.info(f'Found {len(parquet_files)} parquet files')
+    logger.info(f'Found {len(train_parquet_files)} train parquet files in {args.data_dir}')
 
-    file_dict = {'data': parquet_files}
-    num_parquet_files = len(parquet_files)
+    train_file_dict = {'data': train_parquet_files}
+    num_parquet_files = len(train_parquet_files)
+
+    if args.val_data_dir is not None:
+        # Separate train/val directories
+        val_parquet_files = sorted([
+            os.path.join(args.val_data_dir, f)
+            for f in os.listdir(args.val_data_dir)
+            if f.endswith('.parquet')
+        ])
+        logger.info(f'Found {len(val_parquet_files)} val parquet files in {args.val_data_dir}')
+        val_file_dict = {'data': val_parquet_files}
+        train_range = ((0.0, 1.0), 1.0)
+        val_range = ((0.0, 1.0), 1.0)
+    else:
+        # Single directory — split by train_fraction
+        val_file_dict = train_file_dict
+        train_range = ((0.0, args.train_fraction), 1.0)
+        val_range = ((args.train_fraction, 1.0), 1.0)
 
     # Weaver's SimpleIterDataset splits files across DataLoader workers.
     # num_workers must not exceed the number of parquet files, otherwise
@@ -776,10 +797,10 @@ def main():
         logger.info('Streaming data from disk (--no-in-memory)')
 
     train_dataset = SimpleIterDataset(
-        file_dict,
+        train_file_dict,
         data_config_file=args.data_config,
         for_training=True,
-        load_range_and_fraction=((0.0, args.train_fraction), 1.0),
+        load_range_and_fraction=train_range,
         fetch_by_files=True,
         fetch_step=num_parquet_files,
         in_memory=load_in_memory,
@@ -787,12 +808,12 @@ def main():
     data_config = train_dataset.config
 
     val_dataset = SimpleIterDataset(
-        file_dict,
+        val_file_dict,
         data_config_file=args.data_config,
         for_training=False,
-        load_range_and_fraction=((args.train_fraction, 1.0), 1.0),
+        load_range_and_fraction=val_range,
         fetch_by_files=True,
-        fetch_step=num_parquet_files,
+        fetch_step=max(1, len(val_file_dict.get('data', []))),
         in_memory=load_in_memory,
     )
 

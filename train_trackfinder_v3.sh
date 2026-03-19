@@ -34,7 +34,8 @@ CONDA_ENV_NAME="part"
 
 # Default training arguments (can be overridden via command-line)
 DATA_CONFIG="data/low-pt/lowpt_tau_trackfinder.yaml"
-DATA_DIR="data/low-pt/"
+DATA_DIR="data/low-pt/train/"
+VAL_DATA_DIR="data/low-pt/val/"
 NETWORK="networks/lowpt_tau_TrackFinderV3.py"
 MODEL_NAME="TrackFinderV3"
 EXPERIMENTS_DIR="experiments"
@@ -81,6 +82,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TRAIN_CMD="${CONDA_INIT} && cd ${SCRIPT_DIR} && python train_trackfinder.py \
     --data-config ${DATA_CONFIG} \
     --data-dir ${DATA_DIR} \
+    --val-data-dir ${VAL_DATA_DIR} \
     --network ${NETWORK} \
     --model-name ${MODEL_NAME} \
     --experiments-dir ${EXPERIMENTS_DIR} \

@@ -35,6 +35,7 @@ inputs:
       length: 3500
       pad_mode: constant
       vars:
+         ### Original 7 kinematic features
          - track_px
          - track_py
          - track_pz
@@ -42,6 +43,16 @@ inputs:
          - track_phi
          - track_charge
          - track_dxy_significance
+         ### New: longitudinal displacement (recovers 93% of uncanny valley GT pions)
+         - track_dz_significance
+         ### New: track measurement quality
+         - track_pt_error
+         - track_n_valid_pixel_hits
+         ### New: 3D displacement (complements 2D dxy_significance)
+         - track_dca_significance
+         ### New: helix fit precision
+         - track_covariance_phi_phi
+         - track_covariance_lambda_lambda
    pf_vectors:
       length: 3500
       pad_mode: constant

@@ -26,13 +26,13 @@ preprocess:
 
 inputs:
    pf_points:
-      length: 2800
+      length: 3500
       pad_mode: constant
       vars:
          - [track_eta_raw, null]
          - [track_phi_raw, null]
    pf_features:
-      length: 2800
+      length: 3500
       pad_mode: constant
       vars:
          ### Original 7 kinematic features
@@ -54,7 +54,7 @@ inputs:
          - track_covariance_phi_phi
          - track_covariance_lambda_lambda
    pf_vectors:
-      length: 2800
+      length: 3500
       pad_mode: constant
       vars:
          - [track_px_raw, null]
@@ -62,12 +62,12 @@ inputs:
          - [track_pz_raw, null]
          - [track_energy, null]
    pf_mask:
-      length: 2800
+      length: 3500
       pad_mode: constant
       vars:
          - [track_mask, null]
    pf_label:
-      length: 2800
+      length: 3500
       pad_mode: constant
       vars:
          ### Per-track binary label: 1.0 = tau-origin pion, 0.0 = background/padding.

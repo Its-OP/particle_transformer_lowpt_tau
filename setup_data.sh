@@ -8,8 +8,8 @@
 
 set -euo pipefail
 
-TRAIN_ZIP_ID="${TRAIN_ZIP_ID:-PLACEHOLDER_TRAIN_ID}"
-VAL_ZIP_ID="${VAL_ZIP_ID:-PLACEHOLDER_VAL_ID}"
+TRAIN_ZIP_ID="${TRAIN_ZIP_ID:-1_TpMxxoBzJOyQlsrgLj5gprz8qmBoK65}"
+VAL_ZIP_ID="${VAL_ZIP_ID:-1nSXqH22D9RehRlr9jAYRYoUNNuCuVFW6}"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 DATA_DIR="${SCRIPT_DIR}/data/low-pt"

@@ -46,8 +46,6 @@ def get_model(data_config, **kwargs):
     ]:
         kwargs.pop(oc_arg, None)
 
-    input_dim = len(data_config.input_dicts['pf_features'])
-
     # Backbone config: identical to pretraining
     single_layer_params = (32, 256, [(8, 1), (4, 1), (2, 1), (1, 1)], 64)
 

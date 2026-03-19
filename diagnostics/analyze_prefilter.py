@@ -27,8 +27,11 @@ from torch.utils.data import DataLoader
 
 from weaver.utils.dataset import SimpleIterDataset
 
-from pretrain_backbone import load_network_module, trim_to_max_valid_tracks
-from train_trackfinder import extract_label_from_inputs
+from utils.training_utils import (
+    extract_label_from_inputs,
+    load_network_module,
+    trim_to_max_valid_tracks,
+)
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -101,6 +104,9 @@ def collect_statistics(
 
             if num_gt == 0:
                 continue
+
+            # Track count aligned with recall arrays (only events with GT)
+            results.setdefault('event_track_count_with_gt', []).append(num_valid)
 
             # Sort scores descending
             masked_scores = event_scores.clone()
@@ -247,7 +253,7 @@ def main():
 
     # ---- 2. R@200 vs event track count ----
     print_section('2. R@200 vs EVENT TRACK COUNT')
-    track_counts = np.array(results['event_track_count'][:n_events])
+    track_counts = np.array(results['event_track_count_with_gt'][:n_events])
     for lo, hi in [(0, 500), (500, 800), (800, 1100), (1100, 1400), (1400, 1700), (1700, 3000)]:
         sel = (track_counts >= lo) & (track_counts < hi)
         if sel.sum() == 0:

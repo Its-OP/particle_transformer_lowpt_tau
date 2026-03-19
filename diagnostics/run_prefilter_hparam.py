@@ -7,7 +7,7 @@ import torch
 from torch.utils.data import DataLoader
 from weaver.utils.dataset import SimpleIterDataset
 from weaver.nn.model.TrackPreFilter import TrackPreFilter
-from train_trackfinder import extract_label_from_inputs, trim_to_max_valid_tracks
+from utils.training_utils import extract_label_from_inputs, trim_to_max_valid_tracks
 
 sys.stdout.reconfigure(line_buffering=True)
 

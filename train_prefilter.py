@@ -47,15 +47,15 @@ from pretrain_backbone import (
     WarmupThenPlateauScheduler,
     _TeeStream,
     build_experiment_directory,
-    load_network_module,
     plot_loss_curves,
     save_loss_history,
-    trim_to_max_valid_tracks,
 )
-from train_trackfinder import (
+from utils.training_utils import (
     CheckpointManager,
     compute_recall_at_k_metrics,
     extract_label_from_inputs,
+    load_network_module,
+    trim_to_max_valid_tracks,
 )
 
 logger = logging.getLogger('train_prefilter')

@@ -17,7 +17,7 @@ import tempfile
 import pytest
 import torch
 
-from train_trackfinder import CheckpointManager
+from utils.training_utils import CheckpointManager
 from weaver.nn.model.TauTrackFinder import TauTrackFinder
 
 

@@ -71,107 +71,21 @@ from pretrain_backbone import (
     WarmupThenPlateauScheduler,
     _TeeStream,
     build_experiment_directory,
-    load_network_module,
     plot_loss_curves,
     save_loss_history,
+)
+
+# Shared utilities (canonical location: utils/training_utils.py)
+from utils.training_utils import (
+    CheckpointManager,
+    compute_recall_at_k_metrics,
+    extract_label_from_inputs,
+    extract_per_track_scores,
+    load_network_module,
     trim_to_max_valid_tracks,
 )
 
 logger = logging.getLogger('train_trackfinder')
-
-
-class CheckpointManager:
-    """Manages rolling top-K best checkpoints to limit disk usage.
-
-    Tracks saved checkpoint files ranked by validation loss and deletes
-    those that fall outside the top K. The special ``best_model.pt`` file
-    is always maintained as a copy of the rank-1 checkpoint.
-
-    Args:
-        checkpoints_directory: Path to the checkpoints directory.
-        keep_best_k: Maximum number of best checkpoints to retain.
-            When a new checkpoint is saved and the count exceeds this limit,
-            the checkpoint with the worst (highest) validation loss is deleted.
-            Set to 0 to disable cleanup (keep all checkpoints).
-    """
-
-    def __init__(
-        self,
-        checkpoints_directory: str,
-        keep_best_k: int = 5,
-    ):
-        self.checkpoints_directory = checkpoints_directory
-        self.keep_best_k = keep_best_k
-        # Sorted list of (val_loss, epoch, filepath) — best (lowest loss) first
-        self.tracked_checkpoints: list[tuple[float, int, str]] = []
-
-    def save_checkpoint(
-        self,
-        checkpoint_data: dict,
-        epoch: int,
-        val_loss: float,
-        is_best: bool,
-    ) -> str:
-        """Save a checkpoint and prune old ones if exceeding keep_best_k.
-
-        Always saves ``checkpoint_epoch_{epoch}.pt``. If ``is_best``, also
-        saves/overwrites ``best_model.pt``. Then prunes the tracked list
-        so only the top-K checkpoints (by val_loss) remain on disk.
-
-        Args:
-            checkpoint_data: Dict containing model_state_dict, optimizer, etc.
-            epoch: Current epoch number.
-            val_loss: Validation loss for this checkpoint.
-            is_best: Whether this is a new overall best.
-
-        Returns:
-            Path to the saved checkpoint file.
-        """
-        checkpoint_path = os.path.join(
-            self.checkpoints_directory, f'checkpoint_epoch_{epoch}.pt',
-        )
-        torch.save(checkpoint_data, checkpoint_path)
-        logger.info(f'Saved checkpoint: {checkpoint_path}')
-
-        # Track this checkpoint for pruning
-        self.tracked_checkpoints.append((val_loss, epoch, checkpoint_path))
-        # Sort by val_loss ascending (best first)
-        self.tracked_checkpoints.sort(key=lambda entry: entry[0])
-
-        # Save best_model.pt as a copy of the overall best
-        if is_best:
-            best_path = os.path.join(
-                self.checkpoints_directory, 'best_model.pt',
-            )
-            torch.save(checkpoint_data, best_path)
-            logger.info(f'New best model (val_loss={val_loss:.5f})')
-
-        # Prune checkpoints beyond the top K
-        self._prune_checkpoints()
-
-        return checkpoint_path
-
-    def _prune_checkpoints(self):
-        """Delete tracked checkpoints that fall outside the top-K best.
-
-        Skips pruning if keep_best_k is 0 (unlimited) or if the number
-        of tracked checkpoints does not exceed the limit. Never deletes
-        ``best_model.pt`` (it's not tracked in the list).
-        """
-        if self.keep_best_k <= 0:
-            return
-
-        while len(self.tracked_checkpoints) > self.keep_best_k:
-            # Remove the worst (last in sorted list)
-            worst_loss, worst_epoch, worst_path = (
-                self.tracked_checkpoints.pop()
-            )
-            if os.path.exists(worst_path):
-                os.remove(worst_path)
-                logger.info(
-                    f'Pruned checkpoint: epoch {worst_epoch} '
-                    f'(val_loss={worst_loss:.5f})',
-                )
 
 
 def setup_logging(experiment_dir: str):
@@ -198,189 +112,6 @@ def setup_logging(experiment_dir: str):
     # Tee stderr → training.log
     log_file_handle = open(log_file, 'a')  # noqa: SIM115
     sys.stderr = _TeeStream(sys.stderr, log_file_handle)
-
-
-def extract_label_from_inputs(
-    inputs: list[torch.Tensor],
-    label_input_index: int,
-) -> tuple[list[torch.Tensor], torch.Tensor]:
-    """Extract pf_label from inputs list and return remaining inputs + label.
-
-    The data config loads track_label_from_tau as an input group (pf_label)
-    to work around weaver's lack of native per-track label support. This
-    function separates it from the model inputs before forward pass.
-
-    Args:
-        inputs: List of input tensors including pf_label.
-        label_input_index: Index of pf_label in the inputs list.
-
-    Returns:
-        Tuple of (model_inputs, track_labels) where model_inputs has
-        pf_label removed and track_labels is (B, 1, P).
-    """
-    track_labels = inputs[label_input_index]  # (B, 1, P)
-    model_inputs = [
-        tensor for index, tensor in enumerate(inputs)
-        if index != label_input_index
-    ]
-    return model_inputs, track_labels
-
-
-def extract_per_track_scores(output_dict: dict[str, torch.Tensor]) -> torch.Tensor:
-    """Extract per-track ranking scores from any head's inference output.
-
-    Supports all heads:
-        - DETR hybrid: output_dict['per_track_logits'] → (B, P) direct scores
-        - OC: output_dict['beta_scores'] → (B, P) direct scores
-        - DETR query-only: output_dict['mask_logits'] → max over queries → (B, P)
-
-    Args:
-        output_dict: Model inference output dict.
-
-    Returns:
-        per_track_scores: (B, P) scores for ranking tracks (higher = more likely tau).
-    """
-    if 'per_track_logits' in output_dict:
-        # Hybrid DETR: per-track head provides direct tau scores
-        return output_dict['per_track_logits']
-    elif 'beta_scores' in output_dict:
-        return output_dict['beta_scores']
-    elif 'mask_logits' in output_dict:
-        return output_dict['mask_logits'].max(dim=1).values
-    else:
-        raise KeyError(
-            f'Cannot extract per-track scores from output keys: '
-            f'{list(output_dict.keys())}.',
-        )
-
-
-@torch.no_grad()
-def compute_recall_at_k_metrics(
-    per_track_scores: torch.Tensor,
-    track_labels: torch.Tensor,
-    mask: torch.Tensor,
-    k_values: tuple[int, ...] = (10, 20, 30, 100),
-) -> dict[str, float]:
-    """Compute recall@K, d-prime, and median GT rank for track finding.
-
-    Tracks are ranked by score (descending). For each K, recall@K is
-    the fraction of GT pion tracks found in the top-K predictions.
-
-    Additional metrics:
-        - d_prime: separation between GT and background score distributions,
-          d' = (mu_gt - mu_bg) / sqrt(0.5 * (sigma_gt^2 + sigma_bg^2)).
-          Higher = better separation.
-        - median_gt_rank: median rank of GT pions in the sorted score list.
-          Lower = better (0 = top-ranked).
-
-    Args:
-        per_track_scores: (B, P) per-track ranking scores.
-        track_labels: (B, 1, P) binary labels (1.0 = tau pion).
-        mask: (B, 1, P) boolean mask (True = valid track).
-        k_values: Tuple of K values for recall@K (default: 10, 20, 30, 100).
-
-    Returns:
-        Dict with recall_at_K for each K, d_prime, median_gt_rank,
-        and total_gt_tracks.
-    """
-    batch_size = per_track_scores.shape[0]
-    labels_flat = track_labels.squeeze(1) * mask.squeeze(1).float()
-    valid_mask = mask.squeeze(1).bool()
-
-    masked_scores = per_track_scores.clone()
-    masked_scores[~valid_mask] = float('-inf')
-    sorted_indices = masked_scores.argsort(dim=1, descending=True)
-
-    # Build rank lookup: rank_of[i] = position of track i in sorted order
-    rank_lookup = torch.zeros_like(sorted_indices)
-    for batch_index in range(batch_size):
-        rank_lookup[batch_index, sorted_indices[batch_index]] = torch.arange(
-            sorted_indices.shape[1], device=sorted_indices.device,
-        )
-
-    recall_sums = {k: 0.0 for k in k_values}
-    perfect_event_counts = {k: 0 for k in k_values}
-    total_events_with_gt = 0
-    total_gt_tracks = 0
-
-    # Collect scores and ranks for d-prime and median rank
-    all_gt_scores = []
-    all_background_scores = []
-    all_gt_ranks = []
-
-    for batch_index in range(batch_size):
-        gt_positions = labels_flat[batch_index].nonzero(as_tuple=True)[0]
-        gt_set = set(gt_positions.tolist())
-        num_gt = len(gt_set)
-
-        # Collect scores for d-prime
-        event_valid = valid_mask[batch_index]
-        event_labels = labels_flat[batch_index]
-        event_scores = per_track_scores[batch_index]
-
-        gt_mask = (event_labels == 1.0) & event_valid
-        background_mask = (event_labels == 0.0) & event_valid
-
-        if gt_mask.any():
-            all_gt_scores.append(event_scores[gt_mask])
-        if background_mask.any():
-            all_background_scores.append(event_scores[background_mask])
-
-        if num_gt == 0:
-            continue
-
-        total_events_with_gt += 1
-        total_gt_tracks += num_gt
-
-        # Recall@K and perfect event detection
-        event_sorted = sorted_indices[batch_index].tolist()
-        for k in k_values:
-            top_k_set = set(event_sorted[:k])
-            found = len(top_k_set & gt_set)
-            recall_sums[k] += found / num_gt
-            if found == num_gt:
-                perfect_event_counts[k] += 1
-
-        # GT pion ranks
-        for gt_position in gt_positions:
-            all_gt_ranks.append(rank_lookup[batch_index, gt_position].item())
-
-    metrics = {}
-    for k in k_values:
-        metrics[f'recall_at_{k}'] = recall_sums[k] / max(1, total_events_with_gt)
-        metrics[f'perfect_at_{k}'] = perfect_event_counts[k] / max(1, total_events_with_gt)
-    metrics['total_gt_tracks'] = total_gt_tracks
-
-    # d-prime: score separation between GT and background
-    # d' = (mu_gt - mu_bg) / sqrt(0.5 * (sigma_gt^2 + sigma_bg^2))
-    if all_gt_scores and all_background_scores:
-        gt_scores_cat = torch.cat(all_gt_scores)
-        background_scores_cat = torch.cat(all_background_scores)
-        mu_gt = gt_scores_cat.mean().item()
-        mu_background = background_scores_cat.mean().item()
-        sigma_gt = gt_scores_cat.std().item()
-        sigma_background = background_scores_cat.std().item()
-        pooled_std = (0.5 * (sigma_gt ** 2 + sigma_background ** 2)) ** 0.5
-        metrics['d_prime'] = (
-            (mu_gt - mu_background) / pooled_std if pooled_std > 1e-10 else 0.0
-        )
-    else:
-        metrics['d_prime'] = 0.0
-
-    # Median GT rank
-    if all_gt_ranks:
-        sorted_ranks = sorted(all_gt_ranks)
-        midpoint = len(sorted_ranks) // 2
-        if len(sorted_ranks) % 2 == 0:
-            metrics['median_gt_rank'] = (
-                sorted_ranks[midpoint - 1] + sorted_ranks[midpoint]
-            ) / 2.0
-        else:
-            metrics['median_gt_rank'] = float(sorted_ranks[midpoint])
-    else:
-        metrics['median_gt_rank'] = float('inf')
-
-    return metrics
 
 
 def train_one_epoch(
@@ -455,6 +186,8 @@ def train_one_epoch(
         with torch.amp.autocast('cuda', enabled=grad_scaler is not None):
             # model returns loss dict during training
             loss_dict = model(*model_inputs, track_labels=track_labels)
+            # Remove cached logits (non-scalar) before loss accumulation
+            loss_dict.pop('_per_track_logits', None)
             loss = loss_dict['total_loss']
 
         # Skip batches with NaN/Inf loss
@@ -579,21 +312,22 @@ def validate(
                 inputs, label_input_index,
             )
 
-            # Get loss in training mode temporarily
+            # Get loss and cached logits in a single forward pass.
+            # The model returns '_per_track_logits' alongside loss terms
+            # when track_labels is provided — avoids a second forward pass.
             model.train()
             loss_dict = model(*model_inputs, track_labels=track_labels)
             model.eval()
+
+            per_track_scores = loss_dict.pop('_per_track_logits').detach()
 
             if loss_accumulators is None:
                 loss_accumulators = {key: 0.0 for key in loss_dict}
             for key in loss_accumulators:
                 loss_accumulators[key] += loss_dict[key].item()
 
-            # Get per-track scores for recall@K (head-agnostic)
-            output_dict = model(*model_inputs)
+            # Compute recall@K from cached logits
             mask_tensor = model_inputs[3]
-
-            per_track_scores = extract_per_track_scores(output_dict)
             batch_metrics = compute_recall_at_k_metrics(
                 per_track_scores, track_labels, mask_tensor,
             )
@@ -607,7 +341,7 @@ def validate(
             num_batches += 1
 
             del inputs, model_inputs, track_labels, loss_dict
-            del output_dict, mask_tensor, batch_metrics
+            del mask_tensor, batch_metrics, per_track_scores
 
     if loss_accumulators is None:
         loss_accumulators = {'total_loss': 0.0}

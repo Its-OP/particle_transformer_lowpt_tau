@@ -21,8 +21,8 @@ set -euo pipefail
 
 # ---- Check data split ----
 SCRIPT_DIR_CHECK="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TRAIN_PARQUET_COUNT=$(ls "${SCRIPT_DIR_CHECK}"/data/low-pt/train/*.parquet 2>/dev/null | wc -l | tr -d ' ')
-VAL_PARQUET_COUNT=$(ls "${SCRIPT_DIR_CHECK}"/data/low-pt/val/*.parquet 2>/dev/null | wc -l | tr -d ' ')
+TRAIN_PARQUET_COUNT=$(find "${SCRIPT_DIR_CHECK}/data/low-pt/train" -maxdepth 1 -name "*.parquet" 2>/dev/null | wc -l | tr -d ' ')
+VAL_PARQUET_COUNT=$(find "${SCRIPT_DIR_CHECK}/data/low-pt/val" -maxdepth 1 -name "*.parquet" 2>/dev/null | wc -l | tr -d ' ')
 if [ "$TRAIN_PARQUET_COUNT" -lt 10 ] || [ "$VAL_PARQUET_COUNT" -lt 10 ]; then
     echo "WARNING: Found ${TRAIN_PARQUET_COUNT} train and ${VAL_PARQUET_COUNT} val parquet files."
     echo "  Expected 10+ files each for multi-worker loading."

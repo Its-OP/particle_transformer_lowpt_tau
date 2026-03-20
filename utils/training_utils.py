@@ -262,7 +262,7 @@ def compute_recall_at_k_metrics(
 class CheckpointManager:
     """Manages rolling top-K best checkpoints to limit disk usage.
 
-    Tracks saved checkpoint files ranked by validation loss and deletes
+    Tracks saved checkpoint files ranked by a task metric and deletes
     those that fall outside the top K. The special ``best_model.pt`` file
     is always maintained as a copy of the rank-1 checkpoint.
 
@@ -270,37 +270,44 @@ class CheckpointManager:
         checkpoints_directory: Path to the checkpoints directory.
         keep_best_k: Maximum number of best checkpoints to retain.
             When a new checkpoint is saved and the count exceeds this limit,
-            the checkpoint with the worst (highest) validation loss is deleted.
+            the checkpoint with the worst metric value is deleted.
             Set to 0 to disable cleanup (keep all checkpoints).
+        criterion_mode: 'max' if higher metric is better (e.g. R@200),
+            'min' if lower is better (e.g. val loss). Defaults to 'max'.
+        criterion_name: Display name for the criterion in log messages.
     """
 
     def __init__(
         self,
         checkpoints_directory: str,
         keep_best_k: int = 5,
+        criterion_mode: str = 'max',
+        criterion_name: str = 'R@200',
     ):
         self.checkpoints_directory = checkpoints_directory
         self.keep_best_k = keep_best_k
-        # Sorted list of (val_loss, epoch, filepath) — best (lowest loss) first
+        self.criterion_mode = criterion_mode
+        self.criterion_name = criterion_name
+        # Sorted list of (criterion_value, epoch, filepath) — best first
         self.tracked_checkpoints: list[tuple[float, int, str]] = []
 
     def save_checkpoint(
         self,
         checkpoint_data: dict,
         epoch: int,
-        val_loss: float,
+        criterion_value: float,
         is_best: bool,
     ) -> str:
         """Save a checkpoint and prune old ones if exceeding keep_best_k.
 
         Always saves ``checkpoint_epoch_{epoch}.pt``. If ``is_best``, also
         saves/overwrites ``best_model.pt``. Then prunes the tracked list
-        so only the top-K checkpoints (by val_loss) remain on disk.
+        so only the top-K checkpoints (by criterion_value) remain on disk.
 
         Args:
             checkpoint_data: Dict containing model_state_dict, optimizer, etc.
             epoch: Current epoch number.
-            val_loss: Validation loss for this checkpoint.
+            criterion_value: Value of the selection metric (e.g. R@200).
             is_best: Whether this is a new overall best.
 
         Returns:
@@ -313,9 +320,14 @@ class CheckpointManager:
         logger.info(f'Saved checkpoint: {checkpoint_path}')
 
         # Track this checkpoint for pruning
-        self.tracked_checkpoints.append((val_loss, epoch, checkpoint_path))
-        # Sort by val_loss ascending (best first)
-        self.tracked_checkpoints.sort(key=lambda entry: entry[0])
+        self.tracked_checkpoints.append(
+            (criterion_value, epoch, checkpoint_path),
+        )
+        # Sort: best first. For 'max' mode, descending; for 'min', ascending.
+        reverse = self.criterion_mode == 'max'
+        self.tracked_checkpoints.sort(
+            key=lambda entry: entry[0], reverse=reverse,
+        )
 
         # Save best_model.pt as a copy of the overall best
         if is_best:
@@ -323,7 +335,10 @@ class CheckpointManager:
                 self.checkpoints_directory, 'best_model.pt',
             )
             torch.save(checkpoint_data, best_path)
-            logger.info(f'New best model (val_loss={val_loss:.5f})')
+            logger.info(
+                f'New best model '
+                f'({self.criterion_name}={criterion_value:.5f})',
+            )
 
         # Prune checkpoints beyond the top K
         self._prune_checkpoints()
@@ -341,13 +356,13 @@ class CheckpointManager:
             return
 
         while len(self.tracked_checkpoints) > self.keep_best_k:
-            # Remove the worst (last in sorted list)
-            worst_loss, worst_epoch, worst_path = (
+            # Remove the worst (last in sorted list, since best are first)
+            worst_value, worst_epoch, worst_path = (
                 self.tracked_checkpoints.pop()
             )
             if os.path.exists(worst_path):
                 os.remove(worst_path)
                 logger.info(
                     f'Pruned checkpoint: epoch {worst_epoch} '
-                    f'(val_loss={worst_loss:.5f})',
+                    f'({self.criterion_name}={worst_value:.5f})',
                 )

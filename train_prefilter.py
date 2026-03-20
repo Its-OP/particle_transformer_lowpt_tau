@@ -491,6 +491,8 @@ def main():
     checkpoint_manager = CheckpointManager(
         checkpoints_directory=checkpoints_dir,
         keep_best_k=args.keep_best_k,
+        criterion_mode='max',
+        criterion_name='R@200',
     )
 
     # ---- TensorBoard ----
@@ -500,6 +502,7 @@ def main():
     # ---- Training loop ----
     start_epoch = 1
     best_val_loss = float('inf')
+    best_val_recall_at_200 = 0.0
     best_val_epoch = 0
     global_batch_count = 0
     loss_history = {
@@ -517,6 +520,9 @@ def main():
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         start_epoch = checkpoint.get('epoch', 0) + 1
         best_val_loss = checkpoint.get('best_val_loss', float('inf'))
+        best_val_recall_at_200 = checkpoint.get(
+            'best_val_recall_at_200', 0.0,
+        )
         best_val_epoch = checkpoint.get('best_val_epoch', 0)
         global_batch_count = checkpoint.get('global_batch_count', 0)
         logger.info(
@@ -569,10 +575,17 @@ def main():
             )
 
             val_loss = val_losses['total_loss']
-            is_best = val_loss < best_val_loss
+            val_recall_at_200 = val_metrics.get('recall_at_200', 0.0)
+
+            # Best model is selected by R@200 (higher is better),
+            # not val loss — DRW and other techniques intentionally
+            # increase loss while improving task metrics.
+            is_best = val_recall_at_200 > best_val_recall_at_200
             if is_best:
-                best_val_loss = val_loss
+                best_val_recall_at_200 = val_recall_at_200
                 best_val_epoch = epoch
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
 
             def _format_metrics(metrics):
                 perfect_200 = metrics.get('perfect_at_200', 0.0)
@@ -596,7 +609,8 @@ def main():
             if is_best:
                 logger.info(
                     f'Epoch {epoch} val | '
-                    f'total: {val_loss:.5f} ★ new best | '
+                    f'total: {val_loss:.5f} '
+                    f'R@200: {val_recall_at_200:.4f} ★ new best | '
                     f'{val_summary}',
                 )
             else:
@@ -604,7 +618,7 @@ def main():
                 logger.info(
                     f'Epoch {epoch} val | '
                     f'total: {val_loss:.5f} '
-                    f'(best: {best_val_loss:.5f}, '
+                    f'(best R@200: {best_val_recall_at_200:.4f}, '
                     f'{epochs_since_best} epochs ago) | '
                     f'{val_summary}',
                 )
@@ -665,6 +679,7 @@ def main():
                     'model_state_dict': original_model.state_dict(),
                     'optimizer_state_dict': optimizer.state_dict(),
                     'best_val_loss': best_val_loss,
+                    'best_val_recall_at_200': best_val_recall_at_200,
                     'best_val_epoch': best_val_epoch,
                     'global_batch_count': global_batch_count,
                     'val_losses': val_losses,
@@ -672,7 +687,7 @@ def main():
                     'args': vars(args),
                 }
                 checkpoint_manager.save_checkpoint(
-                    checkpoint, epoch, val_loss, is_best,
+                    checkpoint, epoch, val_recall_at_200, is_best,
                 )
 
     except Exception:

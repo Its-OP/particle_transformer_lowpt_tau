@@ -15,7 +15,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 DATA_DIR="${SCRIPT_DIR}/data/low-pt"
 
 # Download and extract train split
-TRAIN_FILE_COUNT=$(ls "${DATA_DIR}/train/"*.parquet 2>/dev/null | wc -l | tr -d ' ')
+TRAIN_FILE_COUNT=$(find "${DATA_DIR}/train" -maxdepth 1 -name "*.parquet" 2>/dev/null | wc -l | tr -d ' ')
 if [ ! -d "${DATA_DIR}/train" ] || [ "$TRAIN_FILE_COUNT" -lt 10 ]; then
     echo "Downloading train split..."
     gdown --id "${TRAIN_ZIP_ID}" -O "${DATA_DIR}/train_split.zip"
@@ -25,7 +25,7 @@ if [ ! -d "${DATA_DIR}/train" ] || [ "$TRAIN_FILE_COUNT" -lt 10 ]; then
 fi
 
 # Download and extract val split
-VAL_FILE_COUNT=$(ls "${DATA_DIR}/val/"*.parquet 2>/dev/null | wc -l | tr -d ' ')
+VAL_FILE_COUNT=$(find "${DATA_DIR}/val" -maxdepth 1 -name "*.parquet" 2>/dev/null | wc -l | tr -d ' ')
 if [ ! -d "${DATA_DIR}/val" ] || [ "$VAL_FILE_COUNT" -lt 10 ]; then
     echo "Downloading val split..."
     gdown --id "${VAL_ZIP_ID}" -O "${DATA_DIR}/val_split.zip"

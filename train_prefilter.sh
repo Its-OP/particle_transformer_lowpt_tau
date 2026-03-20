@@ -39,8 +39,8 @@ CONDA_ENV_NAME="part"
 DATA_CONFIG="data/low-pt/lowpt_tau_trackfinder.yaml"
 DATA_DIR="data/low-pt/train/"
 VAL_DATA_DIR="data/low-pt/val/"
-NETWORK="networks/lowpt_tau_TrackPreFilter.py"
-MODEL_NAME="PreFilter"
+NETWORK="networks/lowpt_tau_ParticleNeXtPreFilter.py"
+MODEL_NAME="ParticleNeXt_PreFilter"
 EXPERIMENTS_DIR="experiments"
 EPOCHS=50
 BATCH_SIZE=96
@@ -50,7 +50,7 @@ DEVICE="cuda:0"
 STEPS_PER_EPOCH=500
 NUM_WORKERS=10
 NO_COMPILE=false
-KEEP_BEST_K=5
+KEEP_BEST_K=10
 
 # ---- Parse extra arguments ----
 EXTRA_ARGS=""

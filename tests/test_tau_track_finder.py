@@ -471,11 +471,12 @@ class TestCheckpointManager:
     """Verify rolling top-K best checkpoint pruning."""
 
     def test_keeps_top_k_checkpoints(self):
-        """Should delete checkpoints beyond top K by val_loss."""
+        """Should delete checkpoints beyond top K by criterion value."""
         with tempfile.TemporaryDirectory() as temporary_directory:
             manager = CheckpointManager(
                 checkpoints_directory=temporary_directory,
                 keep_best_k=3,
+                criterion_mode='min',
             )
 
             # Save 5 checkpoints with decreasing quality (higher val_loss)
@@ -484,7 +485,7 @@ class TestCheckpointManager:
                 manager.save_checkpoint(
                     checkpoint_data,
                     epoch=epoch,
-                    val_loss=epoch * 0.1,
+                    criterion_value=epoch * 0.1,
                     is_best=(epoch == 1),
                 )
 
@@ -520,19 +521,20 @@ class TestCheckpointManager:
             manager = CheckpointManager(
                 checkpoints_directory=temporary_directory,
                 keep_best_k=2,
+                criterion_mode='min',
             )
 
             # First checkpoint is best
             manager.save_checkpoint(
-                {'epoch': 1}, epoch=1, val_loss=0.5, is_best=True,
+                {'epoch': 1}, epoch=1, criterion_value=0.5, is_best=True,
             )
             # Second is worse
             manager.save_checkpoint(
-                {'epoch': 2}, epoch=2, val_loss=0.8, is_best=False,
+                {'epoch': 2}, epoch=2, criterion_value=0.8, is_best=False,
             )
             # Third is better than both — new best
             manager.save_checkpoint(
-                {'epoch': 3}, epoch=3, val_loss=0.3, is_best=True,
+                {'epoch': 3}, epoch=3, criterion_value=0.3, is_best=True,
             )
 
             # best_model.pt should exist (never pruned)
@@ -546,13 +548,14 @@ class TestCheckpointManager:
             manager = CheckpointManager(
                 checkpoints_directory=temporary_directory,
                 keep_best_k=0,
+                criterion_mode='min',
             )
 
             for epoch in range(1, 8):
                 manager.save_checkpoint(
                     {'epoch': epoch},
                     epoch=epoch,
-                    val_loss=epoch * 0.1,
+                    criterion_value=epoch * 0.1,
                     is_best=(epoch == 1),
                 )
 
@@ -564,22 +567,23 @@ class TestCheckpointManager:
             assert len(remaining_files) == 7
 
     def test_later_better_checkpoint_evicts_earlier_worse(self):
-        """A later checkpoint with better loss should evict the worst tracked."""
+        """A later checkpoint with better criterion should evict the worst."""
         with tempfile.TemporaryDirectory() as temporary_directory:
             manager = CheckpointManager(
                 checkpoints_directory=temporary_directory,
                 keep_best_k=2,
+                criterion_mode='min',
             )
 
             # Save 3 checkpoints: 0.5, 0.8, 0.3
             manager.save_checkpoint(
-                {'epoch': 1}, epoch=1, val_loss=0.5, is_best=True,
+                {'epoch': 1}, epoch=1, criterion_value=0.5, is_best=True,
             )
             manager.save_checkpoint(
-                {'epoch': 2}, epoch=2, val_loss=0.8, is_best=False,
+                {'epoch': 2}, epoch=2, criterion_value=0.8, is_best=False,
             )
             manager.save_checkpoint(
-                {'epoch': 3}, epoch=3, val_loss=0.3, is_best=True,
+                {'epoch': 3}, epoch=3, criterion_value=0.3, is_best=True,
             )
 
             # Top 2 are: epoch 3 (0.3) and epoch 1 (0.5)

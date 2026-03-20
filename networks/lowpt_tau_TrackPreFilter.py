@@ -49,6 +49,12 @@ def get_model(data_config, **kwargs):
         # Uniform weights for 30% of training, then 2× upweight positives
         drw_warmup_fraction=0.3,
         drw_positive_weight=2.0,
+        # ISAB global context (Lee et al., ICML 2019):
+        # m=32 inducing points give every track access to event-level summary.
+        # Complexity: O(P·m·d) — linear in track count.
+        use_isab=True,
+        isab_num_inducing=32,
+        isab_num_heads=8,
     )
     configuration.update(**kwargs)
     _logger.info('TrackPreFilter config: %s' % str(configuration))

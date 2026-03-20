@@ -948,3 +948,148 @@ class TestDINOContrastiveDenoising:
         )
         total_params = sum(1 for _ in model.parameters())
         assert params_with_grad >= total_params - 1
+
+
+# ---- ISAB Global Context ----
+
+class TestISABGlobalContext:
+    """Test ISAB (Induced Set Attention Block) global context module.
+
+    ISAB adds global event context after kNN message-passing rounds:
+    m inducing points compress P tracks into a summary, then broadcast
+    back, giving every track access to event-level information.
+    """
+
+    def _make_isab_model(self, num_inducing=16, num_heads=4, **kwargs):
+        """Create a small MLP model with ISAB enabled."""
+        return TrackPreFilter(
+            mode='mlp',
+            input_dim=INPUT_DIM_EXTENDED,
+            hidden_dim=64,
+            num_neighbors=8,
+            num_message_rounds=2,
+            ranking_num_samples=10,
+            use_isab=True,
+            isab_num_inducing=num_inducing,
+            isab_num_heads=num_heads,
+            **kwargs,
+        )
+
+    def test_forward_shape(self):
+        """ISAB model should produce (B, P) scores."""
+        model = self._make_isab_model()
+        points, features, lorentz_vectors = _make_physical_inputs(
+            BATCH_SIZE, NUM_TRACKS, INPUT_DIM_EXTENDED,
+        )
+        mask = torch.ones(BATCH_SIZE, 1, NUM_TRACKS)
+        scores = model(points, features, lorentz_vectors, mask)
+        assert scores.shape == (BATCH_SIZE, NUM_TRACKS)
+
+    def test_masked_tracks_negative_infinity(self):
+        """Padded tracks should still get -inf with ISAB."""
+        model = self._make_isab_model()
+        points, features, lorentz_vectors = _make_physical_inputs(
+            BATCH_SIZE, NUM_TRACKS, INPUT_DIM_EXTENDED,
+        )
+        mask = torch.ones(BATCH_SIZE, 1, NUM_TRACKS)
+        mask[:, :, -30:] = 0.0
+        scores = model(points, features, lorentz_vectors, mask)
+        assert (scores[:, -30:] == float('-inf')).all()
+
+    def test_valid_scores_finite(self):
+        """Valid tracks should have finite scores with ISAB."""
+        model = self._make_isab_model()
+        points, features, lorentz_vectors = _make_physical_inputs(
+            BATCH_SIZE, NUM_TRACKS, INPUT_DIM_EXTENDED,
+        )
+        mask = torch.ones(BATCH_SIZE, 1, NUM_TRACKS)
+        mask[:, :, -30:] = 0.0
+        model.eval()
+        with torch.no_grad():
+            scores = model(points, features, lorentz_vectors, mask)
+        assert scores[:, :-30].isfinite().all()
+
+    def test_compute_loss_finite(self):
+        """Loss should be finite with ISAB enabled."""
+        model = self._make_isab_model()
+        model.train()
+        points, features, lorentz_vectors = _make_physical_inputs(
+            BATCH_SIZE, NUM_TRACKS, INPUT_DIM_EXTENDED,
+        )
+        mask = torch.ones(BATCH_SIZE, 1, NUM_TRACKS)
+        mask[:, :, -30:] = 0.0
+        labels = torch.zeros(BATCH_SIZE, 1, NUM_TRACKS)
+        labels[:, 0, 5] = 1.0
+        labels[:, 0, 15] = 1.0
+        loss_dict = model.compute_loss(
+            points, features, lorentz_vectors, mask, labels,
+        )
+        assert loss_dict['total_loss'].isfinite()
+        assert loss_dict['ranking_loss'].isfinite()
+
+    def test_gradient_flow_through_isab(self):
+        """Gradients should flow through the ISAB module."""
+        model = self._make_isab_model()
+        model.train()
+        points, features, lorentz_vectors = _make_physical_inputs(
+            BATCH_SIZE, NUM_TRACKS, INPUT_DIM_EXTENDED,
+        )
+        mask = torch.ones(BATCH_SIZE, 1, NUM_TRACKS)
+        mask[:, :, -30:] = 0.0
+        labels = torch.zeros(BATCH_SIZE, 1, NUM_TRACKS)
+        labels[:, 0, 5] = 1.0
+        labels[:, 0, 15] = 1.0
+        loss_dict = model.compute_loss(
+            points, features, lorentz_vectors, mask, labels,
+        )
+        loss_dict['total_loss'].backward()
+
+        # Check ISAB-specific params have gradients
+        isab_params_with_grad = sum(
+            1 for name, parameter in model.named_parameters()
+            if 'isab' in name
+            and parameter.grad is not None
+            and parameter.grad.abs().sum() > 0
+        )
+        isab_total = sum(
+            1 for name, _ in model.named_parameters() if 'isab' in name
+        )
+        assert isab_total > 0, 'No ISAB parameters found'
+        assert isab_params_with_grad == isab_total, (
+            f'Only {isab_params_with_grad}/{isab_total} ISAB params have gradients'
+        )
+
+    def test_more_params_than_without_isab(self):
+        """ISAB model should have more parameters than plain MLP."""
+        model_plain = TrackPreFilter(
+            mode='mlp', input_dim=INPUT_DIM_EXTENDED, hidden_dim=64,
+            num_neighbors=8, num_message_rounds=2,
+        )
+        model_isab = self._make_isab_model()
+        params_plain = sum(p.numel() for p in model_plain.parameters())
+        params_isab = sum(p.numel() for p in model_isab.parameters())
+        assert params_isab > params_plain
+
+    def test_isab_disabled_by_default(self):
+        """Default model should NOT have ISAB layers."""
+        model = TrackPreFilter(
+            mode='mlp', input_dim=INPUT_DIM_EXTENDED, hidden_dim=64,
+        )
+        isab_params = [
+            name for name, _ in model.named_parameters() if 'isab' in name
+        ]
+        assert len(isab_params) == 0
+
+    def test_different_inducing_counts(self):
+        """Model should work with various numbers of inducing points."""
+        for num_inducing in [8, 32, 64]:
+            model = self._make_isab_model(num_inducing=num_inducing)
+            points, features, lorentz_vectors = _make_physical_inputs(
+                2, 100, INPUT_DIM_EXTENDED,
+            )
+            mask = torch.ones(2, 1, 100)
+            model.eval()
+            with torch.no_grad():
+                scores = model(points, features, lorentz_vectors, mask)
+            assert scores.shape == (2, 100)
+            assert scores.isfinite().all()

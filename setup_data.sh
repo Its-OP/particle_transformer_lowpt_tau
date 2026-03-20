@@ -18,20 +18,28 @@ DATA_DIR="${SCRIPT_DIR}/data/low-pt"
 TRAIN_FILE_COUNT=$(find "${DATA_DIR}/train" -maxdepth 1 -name "*.parquet" 2>/dev/null | wc -l | tr -d ' ')
 if [ ! -d "${DATA_DIR}/train" ] || [ "$TRAIN_FILE_COUNT" -lt 10 ]; then
     echo "Downloading train split..."
-    gdown --id "${TRAIN_ZIP_ID}" -O "${DATA_DIR}/train_split.zip"
+    gdown --id "${TRAIN_ZIP_ID}" -O "${DATA_DIR}/train_split.zip" || {
+        echo "gdown failed (likely rate-limited). Retrying with curl..."
+        curl -L -o "${DATA_DIR}/train_split.zip" \
+            "https://drive.google.com/uc?export=download&confirm=t&id=${TRAIN_ZIP_ID}"
+    }
     unzip -o "${DATA_DIR}/train_split.zip" -d "${DATA_DIR}/"
     rm "${DATA_DIR}/train_split.zip"
-    echo "Train split: $(ls "${DATA_DIR}"/train/*.parquet | wc -l | tr -d ' ') files"
+    echo "Train split: $(find "${DATA_DIR}/train" -maxdepth 1 -name "*.parquet" | wc -l | tr -d ' ') files"
 fi
 
 # Download and extract val split
 VAL_FILE_COUNT=$(find "${DATA_DIR}/val" -maxdepth 1 -name "*.parquet" 2>/dev/null | wc -l | tr -d ' ')
 if [ ! -d "${DATA_DIR}/val" ] || [ "$VAL_FILE_COUNT" -lt 10 ]; then
     echo "Downloading val split..."
-    gdown --id "${VAL_ZIP_ID}" -O "${DATA_DIR}/val_split.zip"
+    gdown --id "${VAL_ZIP_ID}" -O "${DATA_DIR}/val_split.zip" || {
+        echo "gdown failed (likely rate-limited). Retrying with curl..."
+        curl -L -o "${DATA_DIR}/val_split.zip" \
+            "https://drive.google.com/uc?export=download&confirm=t&id=${VAL_ZIP_ID}"
+    }
     unzip -o "${DATA_DIR}/val_split.zip" -d "${DATA_DIR}/"
     rm "${DATA_DIR}/val_split.zip"
-    echo "Val split: $(ls "${DATA_DIR}"/val/*.parquet | wc -l | tr -d ' ') files"
+    echo "Val split: $(find "${DATA_DIR}/val" -maxdepth 1 -name "*.parquet" | wc -l | tr -d ' ') files"
 fi
 
 echo "Data ready."

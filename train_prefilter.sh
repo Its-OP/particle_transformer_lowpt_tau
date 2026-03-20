@@ -27,7 +27,6 @@ if [ "$TRAIN_PARQUET_COUNT" -lt 10 ] || [ "$VAL_PARQUET_COUNT" -lt 10 ]; then
     echo "WARNING: Found ${TRAIN_PARQUET_COUNT} train and ${VAL_PARQUET_COUNT} val parquet files."
     echo "  Expected 10+ files each for multi-worker loading."
     echo "  Run: python utils/split_parquet.py data/low-pt/train/train.parquet --num-parts 10"
-    echo "  Or:  bash setup_data.sh"
 fi
 echo "Found ${TRAIN_PARQUET_COUNT} train parquet files, ${VAL_PARQUET_COUNT} val parquet files."
 

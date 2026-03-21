@@ -948,3 +948,111 @@ class TestDINOContrastiveDenoising:
         )
         total_params = sum(1 for _ in model.parameters())
         assert params_with_grad >= total_params - 1
+
+
+# ---- SupMin Contrastive Auxiliary Loss ----
+
+class TestSupMinContrastiveLoss:
+    """Test Supervised Minority contrastive auxiliary loss.
+
+    SupMin (Mildenberger et al., CVPR 2025): contrastive supervision only
+    on signal tracks (pull together), NT-Xent on noise (uniformity).
+    Added as auxiliary loss alongside ranking loss.
+    """
+
+    def _make_model(self, **kwargs):
+        return TrackPreFilter(
+            mode='mlp',
+            input_dim=INPUT_DIM_EXTENDED,
+            hidden_dim=64,
+            num_neighbors=8,
+            num_message_rounds=1,
+            ranking_num_samples=10,
+            supmin_weight=0.5,
+            supmin_projection_dim=32,
+            supmin_temperature=0.1,
+            **kwargs,
+        )
+
+    def test_loss_dict_has_supmin_key(self):
+        """Loss dict should contain supmin_loss when enabled."""
+        model = self._make_model()
+        model.train()
+        points, features, lorentz_vectors, mask, labels = _make_training_inputs()
+        features = torch.randn(BATCH_SIZE, INPUT_DIM_EXTENDED, NUM_TRACKS)
+        loss_dict = model.compute_loss(
+            points, features, lorentz_vectors, mask, labels,
+        )
+        assert 'supmin_loss' in loss_dict
+
+    def test_supmin_loss_finite(self):
+        """SupMin loss should be finite."""
+        model = self._make_model()
+        model.train()
+        points, features, lorentz_vectors, mask, labels = _make_training_inputs()
+        features = torch.randn(BATCH_SIZE, INPUT_DIM_EXTENDED, NUM_TRACKS)
+        loss_dict = model.compute_loss(
+            points, features, lorentz_vectors, mask, labels,
+        )
+        assert loss_dict['supmin_loss'].isfinite()
+        assert loss_dict['total_loss'].isfinite()
+
+    def test_supmin_disabled_by_default(self):
+        """Default model should not have supmin loss."""
+        model = TrackPreFilter(
+            mode='mlp', input_dim=INPUT_DIM_EXTENDED, hidden_dim=64,
+        )
+        assert model.supmin_weight == 0.0
+        model.train()
+        points, features, lorentz_vectors, mask, labels = _make_training_inputs()
+        features = torch.randn(BATCH_SIZE, INPUT_DIM_EXTENDED, NUM_TRACKS)
+        loss_dict = model.compute_loss(
+            points, features, lorentz_vectors, mask, labels,
+        )
+        assert 'supmin_loss' not in loss_dict
+
+    def test_supmin_adds_parameters(self):
+        """SupMin projector head should add parameters."""
+        model_plain = TrackPreFilter(
+            mode='mlp', input_dim=INPUT_DIM_EXTENDED, hidden_dim=64,
+            num_neighbors=8, num_message_rounds=1,
+        )
+        model_supmin = self._make_model()
+        params_plain = sum(p.numel() for p in model_plain.parameters())
+        params_supmin = sum(p.numel() for p in model_supmin.parameters())
+        assert params_supmin > params_plain
+
+    def test_supmin_gradient_flow(self):
+        """Gradients should flow through the projector head."""
+        model = self._make_model()
+        model.train()
+        points, features, lorentz_vectors, mask, labels = _make_training_inputs()
+        features = torch.randn(BATCH_SIZE, INPUT_DIM_EXTENDED, NUM_TRACKS)
+        loss_dict = model.compute_loss(
+            points, features, lorentz_vectors, mask, labels,
+        )
+        loss_dict['total_loss'].backward()
+        projector_params_with_grad = sum(
+            1 for name, parameter in model.named_parameters()
+            if 'supmin_projector' in name
+            and parameter.grad is not None
+            and parameter.grad.abs().sum() > 0
+        )
+        projector_total = sum(
+            1 for name, _ in model.named_parameters()
+            if 'supmin_projector' in name
+        )
+        assert projector_total > 0, 'No projector parameters found'
+        assert projector_params_with_grad == projector_total
+
+    def test_not_in_eval_mode(self):
+        """SupMin loss should not be computed in eval mode."""
+        model = self._make_model()
+        model.eval()
+        points, features, lorentz_vectors, mask, labels = _make_training_inputs()
+        features = torch.randn(BATCH_SIZE, INPUT_DIM_EXTENDED, NUM_TRACKS)
+        with torch.no_grad():
+            loss_dict = model.compute_loss(
+                points, features, lorentz_vectors, mask, labels,
+            )
+        assert 'supmin_loss' not in loss_dict

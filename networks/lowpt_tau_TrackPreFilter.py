@@ -49,6 +49,11 @@ def get_model(data_config, **kwargs):
         # Uniform weights for 30% of training, then 2× upweight positives
         drw_warmup_fraction=0.3,
         drw_positive_weight=2.0,
+        # GravNet (Qasim et al., Eur. Phys. J. C 2019):
+        # kNN in learned S-dim space instead of fixed (η,φ).
+        # Signal tracks can cluster → signal-enriched neighborhoods.
+        use_gravnet=True,
+        gravnet_space_dim=4,
     )
     configuration.update(**kwargs)
     _logger.info('TrackPreFilter config: %s' % str(configuration))

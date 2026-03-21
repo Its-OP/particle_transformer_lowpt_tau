@@ -948,3 +948,108 @@ class TestDINOContrastiveDenoising:
         )
         total_params = sum(1 for _ in model.parameters())
         assert params_with_grad >= total_params - 1
+
+
+# ---- GravNet Learned kNN ----
+
+class TestGravNetKNN:
+    """Test GravNet learned-coordinate kNN with distance-weighted aggregation.
+
+    GravNet projects track embeddings to a learned S-dim coordinate space,
+    builds kNN there (so signal tracks can become neighbors), and aggregates
+    with Gaussian distance weights exp(-||s_i - s_j||²).
+    """
+
+    def _make_gravnet_model(self, **kwargs):
+        return TrackPreFilter(
+            mode='mlp',
+            input_dim=INPUT_DIM_EXTENDED,
+            hidden_dim=64,
+            num_neighbors=8,
+            num_message_rounds=2,
+            ranking_num_samples=10,
+            use_gravnet=True,
+            gravnet_space_dim=4,
+            **kwargs,
+        )
+
+    def test_forward_shape(self):
+        """GravNet model should produce (B, P) scores."""
+        model = self._make_gravnet_model()
+        points, features, lorentz_vectors = _make_physical_inputs(
+            BATCH_SIZE, NUM_TRACKS, INPUT_DIM_EXTENDED,
+        )
+        mask = torch.ones(BATCH_SIZE, 1, NUM_TRACKS)
+        scores = model(points, features, lorentz_vectors, mask)
+        assert scores.shape == (BATCH_SIZE, NUM_TRACKS)
+
+    def test_masked_tracks_negative_infinity(self):
+        """Padded tracks should get -inf."""
+        model = self._make_gravnet_model()
+        points, features, lorentz_vectors = _make_physical_inputs(
+            BATCH_SIZE, NUM_TRACKS, INPUT_DIM_EXTENDED,
+        )
+        mask = torch.ones(BATCH_SIZE, 1, NUM_TRACKS)
+        mask[:, :, -30:] = 0.0
+        scores = model(points, features, lorentz_vectors, mask)
+        assert (scores[:, -30:] == float('-inf')).all()
+
+    def test_compute_loss_finite(self):
+        """Loss should be finite with GravNet."""
+        model = self._make_gravnet_model()
+        model.train()
+        points, features, lorentz_vectors = _make_physical_inputs(
+            BATCH_SIZE, NUM_TRACKS, INPUT_DIM_EXTENDED,
+        )
+        mask = torch.ones(BATCH_SIZE, 1, NUM_TRACKS)
+        mask[:, :, -30:] = 0.0
+        labels = torch.zeros(BATCH_SIZE, 1, NUM_TRACKS)
+        labels[:, 0, 5] = 1.0
+        labels[:, 0, 15] = 1.0
+        loss_dict = model.compute_loss(
+            points, features, lorentz_vectors, mask, labels,
+        )
+        assert loss_dict['total_loss'].isfinite()
+
+    def test_more_params_than_baseline(self):
+        """GravNet adds spatial projection layers."""
+        model_plain = TrackPreFilter(
+            mode='mlp', input_dim=INPUT_DIM_EXTENDED, hidden_dim=64,
+            num_neighbors=8, num_message_rounds=2,
+        )
+        model_grav = self._make_gravnet_model()
+        assert sum(p.numel() for p in model_grav.parameters()) > \
+               sum(p.numel() for p in model_plain.parameters())
+
+    def test_gradient_flow(self):
+        """Gradients should flow through spatial projections."""
+        model = self._make_gravnet_model()
+        model.train()
+        points, features, lorentz_vectors = _make_physical_inputs(
+            BATCH_SIZE, NUM_TRACKS, INPUT_DIM_EXTENDED,
+        )
+        mask = torch.ones(BATCH_SIZE, 1, NUM_TRACKS)
+        mask[:, :, -30:] = 0.0
+        labels = torch.zeros(BATCH_SIZE, 1, NUM_TRACKS)
+        labels[:, 0, 5] = 1.0
+        labels[:, 0, 15] = 1.0
+        loss_dict = model.compute_loss(
+            points, features, lorentz_vectors, mask, labels,
+        )
+        loss_dict['total_loss'].backward()
+        gravnet_params_with_grad = sum(
+            1 for name, p in model.named_parameters()
+            if 'spatial' in name and p.grad is not None and p.grad.abs().sum() > 0
+        )
+        gravnet_total = sum(
+            1 for name, _ in model.named_parameters() if 'spatial' in name
+        )
+        assert gravnet_total > 0, 'No spatial projection parameters found'
+        assert gravnet_params_with_grad == gravnet_total
+
+    def test_disabled_by_default(self):
+        """Default model should NOT use GravNet."""
+        model = TrackPreFilter(
+            mode='mlp', input_dim=INPUT_DIM_EXTENDED, hidden_dim=64,
+        )
+        assert not model.use_gravnet

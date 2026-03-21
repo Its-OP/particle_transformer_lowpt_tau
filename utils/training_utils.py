@@ -133,6 +133,133 @@ def extract_per_track_scores(
         )
 
 
+def copy_paste_signal_tracks(
+    points: torch.Tensor,
+    features: torch.Tensor,
+    lorentz_vectors: torch.Tensor,
+    mask: torch.Tensor,
+    track_labels: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Signal copy-paste augmentation for extreme class imbalance.
+
+    For each event in the batch, collects GT signal tracks from ALL OTHER
+    events and appends them to the track list. This increases the positive
+    rate from ~0.3% (3/1100) to ~0.8% (3+9/1100+9) for batch_size=4.
+
+    Pasted tracks get mask=1 and label=1. Original tracks are unchanged
+    (pasted tracks are concatenated along the P dimension).
+
+    No self-paste: event i only receives GT tracks from events j != i.
+
+    Inspired by Simple Copy-Paste (Ghiasi et al., CVPR 2021) and
+    PolarMix (NeurIPS 2022) for point cloud augmentation.
+
+    Args:
+        points: (B, 2, P) coordinates.
+        features: (B, F, P) track features.
+        lorentz_vectors: (B, 4, P) 4-vectors.
+        mask: (B, 1, P) validity mask.
+        track_labels: (B, 1, P) binary labels.
+
+    Returns:
+        Tuple of augmented tensors with shape (B, C, P + num_pasted).
+    """
+    batch_size = points.shape[0]
+    device = points.device
+
+    # Collect GT tracks from each event: list of (B,) lists of per-event GT tensors
+    gt_points_per_event = []
+    gt_features_per_event = []
+    gt_lorentz_per_event = []
+
+    labels_flat = track_labels.squeeze(1)  # (B, P)
+    valid_mask = mask.squeeze(1).bool()  # (B, P)
+
+    for event_index in range(batch_size):
+        gt_indices = (
+            (labels_flat[event_index] == 1.0)
+            & valid_mask[event_index]
+        ).nonzero(as_tuple=True)[0]
+
+        gt_points_per_event.append(points[event_index, :, gt_indices])
+        gt_features_per_event.append(features[event_index, :, gt_indices])
+        gt_lorentz_per_event.append(lorentz_vectors[event_index, :, gt_indices])
+
+    # For each event, collect GT tracks from all OTHER events
+    paste_points = []
+    paste_features = []
+    paste_lorentz = []
+
+    for event_index in range(batch_size):
+        donor_points = []
+        donor_features = []
+        donor_lorentz = []
+        for donor_index in range(batch_size):
+            if donor_index == event_index:
+                continue  # no self-paste
+            donor_points.append(gt_points_per_event[donor_index])
+            donor_features.append(gt_features_per_event[donor_index])
+            donor_lorentz.append(gt_lorentz_per_event[donor_index])
+
+        # Concatenate all donor GT tracks for this event
+        if donor_points:
+            paste_points.append(torch.cat(donor_points, dim=1))
+            paste_features.append(torch.cat(donor_features, dim=1))
+            paste_lorentz.append(torch.cat(donor_lorentz, dim=1))
+        else:
+            # Edge case: batch_size=1, no donors
+            paste_points.append(torch.empty(2, 0, device=device))
+            paste_features.append(torch.empty(features.shape[1], 0, device=device))
+            paste_lorentz.append(torch.empty(4, 0, device=device))
+
+    # Pad to uniform paste count across batch (max pasted tracks)
+    max_pasted = max(p.shape[1] for p in paste_points)
+    if max_pasted == 0:
+        return points, features, lorentz_vectors, mask, track_labels
+
+    for event_index in range(batch_size):
+        current_count = paste_points[event_index].shape[1]
+        pad_count = max_pasted - current_count
+        if pad_count > 0:
+            paste_points[event_index] = torch.nn.functional.pad(
+                paste_points[event_index], (0, pad_count),
+            )
+            paste_features[event_index] = torch.nn.functional.pad(
+                paste_features[event_index], (0, pad_count),
+            )
+            paste_lorentz[event_index] = torch.nn.functional.pad(
+                paste_lorentz[event_index], (0, pad_count),
+            )
+
+    # Stack into (B, C, max_pasted) and concatenate with originals
+    pasted_points = torch.stack(paste_points)  # (B, 2, max_pasted)
+    pasted_features = torch.stack(paste_features)  # (B, F, max_pasted)
+    pasted_lorentz = torch.stack(paste_lorentz)  # (B, 4, max_pasted)
+
+    # Mask and labels for pasted tracks: all valid, all signal
+    pasted_mask = torch.zeros(batch_size, 1, max_pasted, device=device)
+    pasted_labels = torch.zeros(batch_size, 1, max_pasted, device=device)
+    for event_index in range(batch_size):
+        actual_count = sum(
+            gt_points_per_event[j].shape[1]
+            for j in range(batch_size)
+            if j != event_index
+        )
+        pasted_mask[event_index, 0, :actual_count] = 1.0
+        pasted_labels[event_index, 0, :actual_count] = 1.0
+
+    augmented_points = torch.cat([points, pasted_points], dim=2)
+    augmented_features = torch.cat([features, pasted_features], dim=2)
+    augmented_lorentz = torch.cat([lorentz_vectors, pasted_lorentz], dim=2)
+    augmented_mask = torch.cat([mask, pasted_mask], dim=2)
+    augmented_labels = torch.cat([track_labels, pasted_labels], dim=2)
+
+    return (
+        augmented_points, augmented_features, augmented_lorentz,
+        augmented_mask, augmented_labels,
+    )
+
+
 @torch.no_grad()
 def compute_recall_at_k_metrics(
     per_track_scores: torch.Tensor,

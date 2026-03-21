@@ -53,6 +53,7 @@ from pretrain_backbone import (
 from utils.training_utils import (
     CheckpointManager,
     compute_recall_at_k_metrics,
+    copy_paste_signal_tracks,
     extract_label_from_inputs,
     load_network_module,
     trim_to_max_valid_tracks,
@@ -104,6 +105,14 @@ def train_one_epoch(
             inputs, label_input_index,
         )
         points, features, lorentz_vectors, mask = model_inputs
+
+        # Signal copy-paste: paste GT tracks from other events in the batch.
+        # Increases positive rate from ~0.3% to ~0.8% (batch_size dependent).
+        points, features, lorentz_vectors, mask, track_labels = (
+            copy_paste_signal_tracks(
+                points, features, lorentz_vectors, mask, track_labels,
+            )
+        )
 
         optimizer.zero_grad(set_to_none=True)
 

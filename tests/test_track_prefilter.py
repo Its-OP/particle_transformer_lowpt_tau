@@ -5,11 +5,13 @@ TDD: Written before implementation. Tests cover:
     - Top-K selection preserving GT tracks
     - Masking, finiteness, gradient flow
     - Two-stage pipeline integration
+    - Signal copy-paste augmentation
 """
 import pytest
 import torch
 
 from weaver.nn.model.TrackPreFilter import TrackPreFilter
+from utils.training_utils import copy_paste_signal_tracks
 
 
 # ---- Shared configuration ----
@@ -948,3 +950,100 @@ class TestDINOContrastiveDenoising:
         )
         total_params = sum(1 for _ in model.parameters())
         assert params_with_grad >= total_params - 1
+
+
+# ---- Signal Copy-Paste Augmentation ----
+
+class TestCopyPasteSignalTracks:
+    """Test signal copy-paste augmentation.
+
+    Pastes GT tracks from other events in the batch into each event,
+    increasing the positive rate from ~0.3% to ~0.5-1.0%.
+    """
+
+    def _make_inputs(self):
+        """Create batch with known GT positions."""
+        batch_size, num_tracks = 4, 100
+        points = torch.randn(batch_size, 2, num_tracks)
+        features = torch.randn(batch_size, 13, num_tracks)
+        lorentz_vectors = torch.randn(batch_size, 4, num_tracks)
+        mask = torch.ones(batch_size, 1, num_tracks)
+        mask[:, :, -20:] = 0.0  # 80 valid tracks per event
+        labels = torch.zeros(batch_size, 1, num_tracks)
+        # 3 GT tracks per event at different positions
+        labels[0, 0, [5, 15, 25]] = 1.0
+        labels[1, 0, [10, 20, 30]] = 1.0
+        labels[2, 0, [7, 17, 27]] = 1.0
+        labels[3, 0, [3, 13, 23]] = 1.0
+        return points, features, lorentz_vectors, mask, labels
+
+    def test_output_shapes_grow(self):
+        """Track dimension P should increase after copy-paste."""
+        points, features, lorentz_vectors, mask, labels = self._make_inputs()
+        original_num_tracks = points.shape[2]
+        aug = copy_paste_signal_tracks(
+            points, features, lorentz_vectors, mask, labels,
+        )
+        assert aug[0].shape[2] > original_num_tracks
+        for tensor in aug:
+            assert tensor.shape[2] == aug[0].shape[2]
+
+    def test_batch_size_preserved(self):
+        """Batch dimension should not change."""
+        points, features, lorentz_vectors, mask, labels = self._make_inputs()
+        aug = copy_paste_signal_tracks(
+            points, features, lorentz_vectors, mask, labels,
+        )
+        for tensor in aug:
+            assert tensor.shape[0] == 4
+
+    def test_more_positives_after_paste(self):
+        """Each event should have more GT tracks after copy-paste."""
+        points, features, lorentz_vectors, mask, labels = self._make_inputs()
+        _, _, _, aug_mask, aug_labels = copy_paste_signal_tracks(
+            points, features, lorentz_vectors, mask, labels,
+        )
+        for event_index in range(4):
+            valid = aug_mask[event_index, 0] > 0
+            original_gt = (labels[event_index, 0] == 1.0).sum().item()
+            augmented_gt = (
+                (aug_labels[event_index, 0] == 1.0) & valid
+            ).sum().item()
+            assert augmented_gt > original_gt
+
+    def test_original_tracks_preserved(self):
+        """Original tracks should be unchanged (pasted tracks appended)."""
+        points, features, lorentz_vectors, mask, labels = self._make_inputs()
+        original_num_tracks = points.shape[2]
+        aug_points, aug_features, _, _, _ = copy_paste_signal_tracks(
+            points, features, lorentz_vectors, mask, labels,
+        )
+        assert torch.equal(aug_points[:, :, :original_num_tracks], points)
+        assert torch.equal(aug_features[:, :, :original_num_tracks], features)
+
+    def test_pasted_tracks_are_valid_signal(self):
+        """Pasted tracks should have mask=1 and label=1."""
+        points, features, lorentz_vectors, mask, labels = self._make_inputs()
+        original_num_tracks = points.shape[2]
+        _, _, _, aug_mask, aug_labels = copy_paste_signal_tracks(
+            points, features, lorentz_vectors, mask, labels,
+        )
+        pasted_mask = aug_mask[:, :, original_num_tracks:]
+        pasted_labels = aug_labels[:, :, original_num_tracks:]
+        assert (pasted_mask == 1.0).all()
+        assert (pasted_labels == 1.0).all()
+
+    def test_no_self_paste(self):
+        """GT tracks from event i should NOT be pasted back into event i."""
+        points, features, lorentz_vectors, mask, labels = self._make_inputs()
+        # Mark event 0 GT tracks with unique value
+        features[0, :, 5] = 999.0
+        features[0, :, 15] = 999.0
+        features[0, :, 25] = 999.0
+
+        _, aug_features, _, _, _ = copy_paste_signal_tracks(
+            points, features, lorentz_vectors, mask, labels,
+        )
+        original_num_tracks = features.shape[2]
+        pasted_in_event0 = aug_features[0, :, original_num_tracks:]
+        assert not (pasted_in_event0 == 999.0).any()

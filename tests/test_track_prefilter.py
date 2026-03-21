@@ -948,3 +948,113 @@ class TestDINOContrastiveDenoising:
         )
         total_params = sum(1 for _ in model.parameters())
         assert params_with_grad >= total_params - 1
+
+
+# ---- EdgeConv Pairwise Features ----
+
+class TestEdgeConvPairwise:
+    """Test EdgeConv-style pairwise features in message passing.
+
+    Replaces gather-and-max-pool with EdgeConv: h_ij = MLP(x_i ∥ x_j − x_i ∥ lv_fts).
+    Uses pairwise Lorentz-vector features (ln kT, ln z, ln ΔR, ln m²) plus
+    charge product as physics-informed edge features.
+    """
+
+    def _make_edgeconv_model(self, **kwargs):
+        return TrackPreFilter(
+            mode='mlp',
+            input_dim=INPUT_DIM_EXTENDED,
+            hidden_dim=64,
+            num_neighbors=8,
+            num_message_rounds=2,
+            ranking_num_samples=10,
+            use_pairwise_features=True,
+            **kwargs,
+        )
+
+    def test_forward_shape(self):
+        """EdgeConv model should produce (B, P) scores."""
+        model = self._make_edgeconv_model()
+        points, features, lorentz_vectors = _make_physical_inputs(
+            BATCH_SIZE, NUM_TRACKS, INPUT_DIM_EXTENDED,
+        )
+        mask = torch.ones(BATCH_SIZE, 1, NUM_TRACKS)
+        scores = model(points, features, lorentz_vectors, mask)
+        assert scores.shape == (BATCH_SIZE, NUM_TRACKS)
+
+    def test_valid_scores_finite(self):
+        """Valid tracks should have finite scores."""
+        model = self._make_edgeconv_model()
+        points, features, lorentz_vectors = _make_physical_inputs(
+            BATCH_SIZE, NUM_TRACKS, INPUT_DIM_EXTENDED,
+        )
+        mask = torch.ones(BATCH_SIZE, 1, NUM_TRACKS)
+        mask[:, :, -30:] = 0.0
+        model.eval()
+        with torch.no_grad():
+            scores = model(points, features, lorentz_vectors, mask)
+        assert scores[:, :-30].isfinite().all()
+
+    def test_compute_loss_finite(self):
+        """Loss should be finite with EdgeConv enabled."""
+        model = self._make_edgeconv_model()
+        model.train()
+        points, features, lorentz_vectors = _make_physical_inputs(
+            BATCH_SIZE, NUM_TRACKS, INPUT_DIM_EXTENDED,
+        )
+        mask = torch.ones(BATCH_SIZE, 1, NUM_TRACKS)
+        mask[:, :, -30:] = 0.0
+        labels = torch.zeros(BATCH_SIZE, 1, NUM_TRACKS)
+        labels[:, 0, 5] = 1.0
+        labels[:, 0, 15] = 1.0
+        loss_dict = model.compute_loss(
+            points, features, lorentz_vectors, mask, labels,
+        )
+        assert loss_dict['total_loss'].isfinite()
+        assert loss_dict['ranking_loss'].isfinite()
+
+    def test_more_params_than_baseline(self):
+        """EdgeConv model should have more params (edge MLP added)."""
+        model_plain = TrackPreFilter(
+            mode='mlp', input_dim=INPUT_DIM_EXTENDED, hidden_dim=64,
+            num_neighbors=8, num_message_rounds=2,
+        )
+        model_edge = self._make_edgeconv_model()
+        params_plain = sum(p.numel() for p in model_plain.parameters())
+        params_edge = sum(p.numel() for p in model_edge.parameters())
+        assert params_edge > params_plain
+
+    def test_gradient_flow(self):
+        """Gradients should flow through edge MLPs."""
+        model = self._make_edgeconv_model()
+        model.train()
+        points, features, lorentz_vectors = _make_physical_inputs(
+            BATCH_SIZE, NUM_TRACKS, INPUT_DIM_EXTENDED,
+        )
+        mask = torch.ones(BATCH_SIZE, 1, NUM_TRACKS)
+        mask[:, :, -30:] = 0.0
+        labels = torch.zeros(BATCH_SIZE, 1, NUM_TRACKS)
+        labels[:, 0, 5] = 1.0
+        labels[:, 0, 15] = 1.0
+        loss_dict = model.compute_loss(
+            points, features, lorentz_vectors, mask, labels,
+        )
+        loss_dict['total_loss'].backward()
+        edge_params_with_grad = sum(
+            1 for name, parameter in model.named_parameters()
+            if 'edge' in name
+            and parameter.grad is not None
+            and parameter.grad.abs().sum() > 0
+        )
+        edge_total = sum(
+            1 for name, _ in model.named_parameters() if 'edge' in name
+        )
+        assert edge_total > 0, 'No edge MLP parameters found'
+        assert edge_params_with_grad == edge_total
+
+    def test_disabled_by_default(self):
+        """Default model should NOT use pairwise features."""
+        model = TrackPreFilter(
+            mode='mlp', input_dim=INPUT_DIM_EXTENDED, hidden_dim=64,
+        )
+        assert not model.use_pairwise_features

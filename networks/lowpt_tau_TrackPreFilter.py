@@ -49,6 +49,10 @@ def get_model(data_config, **kwargs):
         # Uniform weights for 30% of training, then 2× upweight positives
         drw_warmup_fraction=0.3,
         drw_positive_weight=2.0,
+        # EdgeConv pairwise features: h_ij = MLP(x_i ∥ x_j − x_i ∥ lv_fts ∥ q_i·q_j)
+        # Adds 4 pairwise Lorentz-vector features + charge product per kNN edge.
+        # ParT ablation: removing pairwise features drops 0.86 → 0.40.
+        use_pairwise_features=True,
     )
     configuration.update(**kwargs)
     _logger.info('TrackPreFilter config: %s' % str(configuration))

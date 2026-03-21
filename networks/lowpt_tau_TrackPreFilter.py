@@ -54,6 +54,10 @@ def get_model(data_config, **kwargs):
         # Signal tracks can cluster → signal-enriched neighborhoods.
         use_gravnet=True,
         gravnet_space_dim=4,
+        # Metric learning loss on learned space: attract GT pairs, repel noise.
+        # Gives spatial projection direct signal for signal clustering.
+        gravnet_distance_loss_weight=0.5,
+        gravnet_distance_loss_margin=1.0,
     )
     configuration.update(**kwargs)
     _logger.info('TrackPreFilter config: %s' % str(configuration))

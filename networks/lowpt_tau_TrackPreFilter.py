@@ -49,6 +49,11 @@ def get_model(data_config, **kwargs):
         # Uniform weights for 30% of training, then 2× upweight positives
         drw_warmup_fraction=0.3,
         drw_positive_weight=2.0,
+        # SupMin contrastive auxiliary loss (Mildenberger et al., CVPR 2025):
+        # Pulls signal embeddings together, spreads noise uniformly.
+        supmin_weight=0.5,
+        supmin_projection_dim=64,
+        supmin_temperature=0.1,
     )
     configuration.update(**kwargs)
     _logger.info('TrackPreFilter config: %s' % str(configuration))

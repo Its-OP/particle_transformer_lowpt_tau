@@ -2,13 +2,17 @@
 
 Default configuration: MLP mode with hidden_dim=192,
 num_message_rounds=2, ranking_num_samples=50.
-Autoencoder removed — with 13-dim input and 48-dim latent (3.7× wider),
-reconstruction was trivially solvable and added no discriminative value.
 
-Training improvements:
-- Temperature-scheduled ranking loss (high T → low T over training)
-- Temperature-scheduled denoising sigma (large noise → small noise)
-- Deferred Re-Weighting: uniform weights first, then upweight positives
+Input features (16): px, py, pz, eta, phi, charge, dxy_significance,
+log_dz_significance, normalized_chi2, log_pt_error, n_valid_pixel_hits,
+dca_significance, log_covariance_phi_phi, log_covariance_lambda_lambda,
+log_pt, relative_pt_error.
+
+Key fixes over 13-feature version:
+- dz_significance log-transformed (was 99.9% clipped by auto-standardization)
+- pt_error, covariance_phi_phi, covariance_lambda_lambda log-transformed
+- Added normalized_chi2 (#1 CMS track quality feature)
+- Added log(pT) and relative pT error (standard in CMS/ATLAS taggers)
 """
 
 from weaver.nn.model.TrackPreFilter import TrackPreFilter

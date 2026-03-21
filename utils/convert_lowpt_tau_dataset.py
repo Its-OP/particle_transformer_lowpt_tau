@@ -87,6 +87,7 @@ DEFAULT_COLUMNS = [
     'track_phi',
     'track_charge',
     'track_dxy_significance',
+    'track_norm_chi2',
     'track_label_from_tau',
 ]
 

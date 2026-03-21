@@ -310,6 +310,11 @@ def main():
     parser.add_argument('--save-every', type=int, default=5)
     parser.add_argument('--keep-best-k', type=int, default=5)
     parser.add_argument('--resume', type=str, default=None)
+    parser.add_argument(
+        '--model-kwargs', type=str, default=None,
+        help='Model config overrides as key=value pairs, comma-separated. '
+             'e.g. --model-kwargs gravnet_distance_loss_weight=1.0,hidden_dim=256',
+    )
 
     args = parser.parse_args()
     device = torch.device(args.device)
@@ -416,7 +421,23 @@ def main():
 
     # ---- Model ----
     network_module = load_network_module(args.network)
-    model, model_info = network_module.get_model(data_config)
+    model_kwargs = {}
+    if args.model_kwargs:
+        for pair in args.model_kwargs.split(','):
+            key, value = pair.strip().split('=', 1)
+            # Auto-cast: try int, then float, then bool, then string
+            for cast in (int, float):
+                try:
+                    value = cast(value)
+                    break
+                except ValueError:
+                    continue
+            else:
+                if value.lower() in ('true', 'false'):
+                    value = value.lower() == 'true'
+            model_kwargs[key.strip()] = value
+        logger.info(f'Model kwargs overrides: {model_kwargs}')
+    model, model_info = network_module.get_model(data_config, **model_kwargs)
     model = model.to(device)
 
     total_params = sum(p.numel() for p in model.parameters())

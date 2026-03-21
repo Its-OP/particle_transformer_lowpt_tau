@@ -948,3 +948,95 @@ class TestDINOContrastiveDenoising:
         )
         total_params = sum(1 for _ in model.parameters())
         assert params_with_grad >= total_params - 1
+
+
+# ---- OHEM (Online Hard Example Mining) ----
+
+class TestOHEM:
+    """Test OHEM negative mining in ranking loss.
+
+    OHEM replaces random negative sampling with selection of the
+    K highest-scoring negatives (hardest examples). This forces the
+    model to focus on the decision boundary.
+    """
+
+    def _make_model(self, hard_negative_mining=True, **kwargs):
+        return TrackPreFilter(
+            mode='mlp',
+            input_dim=INPUT_DIM_EXTENDED,
+            hidden_dim=64,
+            num_neighbors=8,
+            num_message_rounds=1,
+            ranking_num_samples=10,
+            hard_negative_mining=hard_negative_mining,
+            **kwargs,
+        )
+
+    def test_ohem_produces_finite_loss(self):
+        """OHEM model should produce finite losses."""
+        model = self._make_model()
+        model.train()
+        points, features, lorentz_vectors, mask, labels = _make_training_inputs()
+        features = torch.randn(BATCH_SIZE, INPUT_DIM_EXTENDED, NUM_TRACKS)
+        loss_dict = model.compute_loss(
+            points, features, lorentz_vectors, mask, labels,
+        )
+        assert loss_dict['total_loss'].isfinite()
+        assert loss_dict['ranking_loss'].isfinite()
+
+    def test_ohem_loss_ge_random(self):
+        """OHEM selects hardest negatives, so loss should be >= random sampling."""
+        torch.manual_seed(42)
+        model_ohem = self._make_model(hard_negative_mining=True)
+        model_random = self._make_model(hard_negative_mining=False)
+        model_random.load_state_dict(model_ohem.state_dict())
+
+        model_ohem.eval()
+        model_random.eval()
+
+        points, features, lorentz_vectors, mask, labels = _make_training_inputs()
+        features = torch.randn(BATCH_SIZE, INPUT_DIM_EXTENDED, NUM_TRACKS)
+
+        with torch.no_grad():
+            scores = model_ohem(points, features, lorentz_vectors, mask)
+
+        valid_mask = mask.squeeze(1).bool()
+        labels_flat = labels.squeeze(1) * valid_mask.float()
+
+        loss_ohem = model_ohem._ranking_loss(scores, labels_flat, valid_mask)
+
+        # Random loss averaged over many seeds to get a stable baseline
+        random_losses = []
+        for seed in range(20):
+            torch.manual_seed(seed)
+            random_losses.append(
+                model_random._ranking_loss(scores, labels_flat, valid_mask).item()
+            )
+        avg_random = sum(random_losses) / len(random_losses)
+
+        assert loss_ohem.item() >= avg_random - 0.01, (
+            f'OHEM loss ({loss_ohem:.4f}) should be >= avg random ({avg_random:.4f})'
+        )
+
+    def test_ohem_disabled_by_default(self):
+        """Default model should use random sampling, not OHEM."""
+        model = TrackPreFilter(
+            mode='mlp', input_dim=INPUT_DIM_EXTENDED, hidden_dim=64,
+        )
+        assert not model.hard_negative_mining
+
+    def test_ohem_gradient_flow(self):
+        """Gradients should flow through OHEM loss."""
+        model = self._make_model()
+        model.train()
+        points, features, lorentz_vectors, mask, labels = _make_training_inputs()
+        features = torch.randn(BATCH_SIZE, INPUT_DIM_EXTENDED, NUM_TRACKS)
+        loss_dict = model.compute_loss(
+            points, features, lorentz_vectors, mask, labels,
+        )
+        loss_dict['total_loss'].backward()
+        params_with_grad = sum(
+            1 for p in model.parameters()
+            if p.grad is not None and p.grad.abs().sum() > 0
+        )
+        assert params_with_grad > 0

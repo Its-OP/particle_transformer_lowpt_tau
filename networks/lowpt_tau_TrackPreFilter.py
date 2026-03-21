@@ -49,6 +49,10 @@ def get_model(data_config, **kwargs):
         # Uniform weights for 30% of training, then 2× upweight positives
         drw_warmup_fraction=0.3,
         drw_positive_weight=2.0,
+        # OHEM (Shrivastava et al., CVPR 2016):
+        # Select K highest-scoring negatives instead of random sampling.
+        # Forces model to focus on the decision boundary.
+        hard_negative_mining=True,
     )
     configuration.update(**kwargs)
     _logger.info('TrackPreFilter config: %s' % str(configuration))

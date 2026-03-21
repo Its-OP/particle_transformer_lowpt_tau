@@ -10,6 +10,19 @@ new_variables:
    ### Assumed pion mass: E = sqrt(px^2 + py^2 + pz^2 + m_pi^2), m_pi = 0.13957 GeV
    track_energy: np.sqrt(track_px**2 + track_py**2 + track_pz**2 + 0.13957**2)
    ###
+   ### Log-transformed features: compress heavy-tailed distributions that
+   ### auto-standardization clips (dz_sig: 99.9% clipped, covs: scale >7000).
+   ### sign(x) * log(1 + |x|) for signed quantities, log(1 + x) for positive.
+   track_log_dz_significance: np.sign(track_dz_significance) * np.log1p(np.abs(track_dz_significance))
+   ### log(x) not log1p(x): pt_error values are ~0.01, log1p(0.01)≈0.01 (no spread)
+   track_log_pt_error: np.log(track_pt_error + 1e-12)
+   track_log_covariance_phi_phi: np.log(track_covariance_phi_phi + 1e-12)
+   track_log_covariance_lambda_lambda: np.log(track_covariance_lambda_lambda + 1e-12)
+   ###
+   ### Derived features: standard in CMS/ATLAS taggers (DeepJet, DeepTau, GN2)
+   track_log_pt: np.log(track_pt + 1e-6)
+   track_log_relative_pt_error: np.log(track_pt_error / (track_pt + 1e-6) + 1e-12)
+   ###
    ### Raw aliases: avoid parameter collision between standardized and raw copies
    track_eta_raw: track_eta
    track_phi_raw: track_phi
@@ -35,24 +48,32 @@ inputs:
       length: 3500
       pad_mode: constant
       vars:
-         ### Original 7 kinematic features
+         ### Kinematic features
          - track_px
          - track_py
          - track_pz
          - track_eta
          - track_phi
          - track_charge
+         ### Displacement features
          - track_dxy_significance
-         ### New: longitudinal displacement (recovers 93% of uncanny valley GT pions)
-         - track_dz_significance
-         ### New: track measurement quality
-         - track_pt_error
+         ### Log-transformed dz significance: raw has std=488, auto-standardization
+         ### clips 99.9% of values. sign(x)*log(1+|x|) preserves full dynamic range.
+         - track_log_dz_significance
+         ### Track fit quality (chi2/ndof ≈ 1 for real tracks, >> 1 for fakes)
+         ### TODO: uncomment once parquet is re-exported with this column
+         # - track_normalized_chi2
+         ### Track measurement quality (log-transformed to compress tails)
+         - track_log_pt_error
          - track_n_valid_pixel_hits
-         ### New: 3D displacement (complements 2D dxy_significance)
+         ### 3D displacement (complements 2D dxy_significance)
          - track_dca_significance
-         ### New: helix fit precision
-         - track_covariance_phi_phi
-         - track_covariance_lambda_lambda
+         ### Helix fit precision (log-transformed: raw scales are 7530 and 86704)
+         - track_log_covariance_phi_phi
+         - track_log_covariance_lambda_lambda
+         ### Derived features (standard in CMS/ATLAS taggers)
+         - track_log_pt
+         - track_log_relative_pt_error
    pf_vectors:
       length: 3500
       pad_mode: constant

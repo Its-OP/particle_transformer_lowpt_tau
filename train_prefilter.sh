@@ -7,9 +7,12 @@
 #   - "prefilter_gpu":   GPU monitoring (nvidia-smi, refreshes every second)
 #
 # Usage:
-#   bash train_prefilter.sh                  # default settings
-#   bash train_prefilter.sh --epochs 100     # override defaults
-#   bash train_prefilter.sh --resume experiments/PreFilter_.../checkpoints/checkpoint_epoch_50.pt
+#   bash train_prefilter.sh <experiment_name>                  # required
+#   bash train_prefilter.sh supmin --epochs 100                # with overrides
+#   bash train_prefilter.sh ohem --resume experiments/ohem_PreFilter_.../checkpoints/checkpoint_epoch_50.pt
+#
+# The experiment name is used as a prefix for the experiment folder:
+#   experiments/{name}_PreFilter_{timestamp}/
 #
 # To reattach after disconnecting:
 #   screen -r prefilter_train    # training output
@@ -18,6 +21,15 @@
 # To detach from a screen:  Ctrl+A, then D
 # =============================================================================
 set -euo pipefail
+
+# ---- Require experiment name ----
+if [ $# -lt 1 ]; then
+    echo "Usage: bash train_prefilter.sh <experiment_name> [extra args...]"
+    echo "Example: bash train_prefilter.sh supmin --epochs 100"
+    exit 1
+fi
+EXPERIMENT_NAME="$1"
+shift
 
 # ---- Check data split ----
 SCRIPT_DIR_CHECK="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -40,7 +52,7 @@ DATA_CONFIG="data/low-pt/lowpt_tau_trackfinder.yaml"
 DATA_DIR="data/low-pt/train/"
 VAL_DATA_DIR="data/low-pt/val/"
 NETWORK="networks/lowpt_tau_TrackPreFilter.py"
-MODEL_NAME="PreFilter"
+MODEL_NAME="${EXPERIMENT_NAME}_PreFilter"
 EXPERIMENTS_DIR="experiments"
 EPOCHS=50
 BATCH_SIZE=96
@@ -122,9 +134,10 @@ fi
 
 # ---- Launch screen sessions ----
 echo "============================================"
-echo "  Launching pre-filter training"
+echo "  Launching pre-filter training [${EXPERIMENT_NAME}]"
 echo "============================================"
 echo ""
+echo "Experiment: ${EXPERIMENT_NAME}"
 echo "Session:    ${SESSION_TRAIN} (training)"
 echo "            ${SESSION_GPU} (GPU monitor)"
 echo "Experiments: ${SCRIPT_DIR}/${EXPERIMENTS_DIR}/"

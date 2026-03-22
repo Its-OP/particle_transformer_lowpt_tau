@@ -948,3 +948,263 @@ class TestDINOContrastiveDenoising:
         )
         total_params = sum(1 for _ in model.parameters())
         assert params_with_grad >= total_params - 1
+
+
+# ---- RS@K Surrogate Loss (Phase 1.1) ----
+
+class TestRSAtKLoss:
+    """Test RS@K (Recall-Surrogate@K) loss from Patel et al., CVPR 2022.
+
+    RS@K = (1/|P|) * sum_p σ(τ₁⁻¹ · (K - sum_n σ(τ₂⁻¹ · (s_n - s_p))))
+
+    Two nested sigmoid relaxations:
+        - Inner: σ(τ₂⁻¹ · (s_neg - s_pos)) estimates soft rank of each positive
+        - Outer: σ(τ₁⁻¹ · (K - soft_rank)) gives soft indicator for being in top-K
+    """
+
+    def test_rs_at_k_loss_returns_finite(self):
+        """RS@K loss should return a finite scalar."""
+        model = TrackPreFilter(
+            mode='mlp', input_dim=INPUT_DIM,
+            rs_at_k_weight_start=0.0,
+            rs_at_k_weight_end=1.0,
+            rs_at_k_target=50,
+        )
+        model.set_temperature_progress(1.0)
+
+        scores = torch.randn(BATCH_SIZE, NUM_TRACKS)
+        labels = torch.zeros(BATCH_SIZE, NUM_TRACKS)
+        for batch_index in range(BATCH_SIZE):
+            labels[batch_index, 10] = 1.0
+            labels[batch_index, 20] = 1.0
+            labels[batch_index, 30] = 1.0
+        valid_mask = torch.ones(BATCH_SIZE, NUM_TRACKS, dtype=torch.bool)
+        valid_mask[:, -30:] = False
+
+        loss = model._rs_at_k_loss(scores, labels, valid_mask)
+        assert torch.isfinite(loss).all()
+
+    def test_rs_at_k_loss_is_differentiable(self):
+        """RS@K loss must produce gradients through scores."""
+        model = TrackPreFilter(
+            mode='mlp', input_dim=INPUT_DIM,
+            rs_at_k_weight_start=1.0,
+            rs_at_k_weight_end=1.0,
+            rs_at_k_target=50,
+        )
+        scores = torch.randn(2, NUM_TRACKS, requires_grad=True)
+        labels = torch.zeros(2, NUM_TRACKS)
+        labels[0, 10] = 1.0
+        labels[1, 20] = 1.0
+        valid_mask = torch.ones(2, NUM_TRACKS, dtype=torch.bool)
+
+        loss = model._rs_at_k_loss(scores, labels, valid_mask)
+        loss.backward()
+
+        assert scores.grad is not None
+        assert scores.grad.abs().sum() > 0, 'No gradients flowed through RS@K loss'
+
+    def test_rs_at_k_decreases_with_better_ranking(self):
+        """RS@K should be lower when positives rank higher (= better recall).
+
+        When all positives are in top-K, the loss should be minimal.
+        When positives are ranked below K, the loss should be higher.
+        """
+        model = TrackPreFilter(
+            mode='mlp', input_dim=INPUT_DIM,
+            rs_at_k_weight_start=1.0,
+            rs_at_k_weight_end=1.0,
+            rs_at_k_target=50,
+            rs_at_k_tau1=1.0,
+            rs_at_k_tau2=1.0,
+        )
+        labels = torch.zeros(1, NUM_TRACKS)
+        labels[0, 10] = 1.0
+        labels[0, 20] = 1.0
+        labels[0, 30] = 1.0
+        valid_mask = torch.ones(1, NUM_TRACKS, dtype=torch.bool)
+
+        # Good ranking: all 3 GT tracks in top-5
+        scores_good = torch.zeros(1, NUM_TRACKS) - 10.0
+        scores_good[0, 10] = 10.0
+        scores_good[0, 20] = 9.0
+        scores_good[0, 30] = 8.0
+
+        # Bad ranking: GT tracks rank below K=50
+        scores_bad = torch.zeros(1, NUM_TRACKS) + 5.0
+        scores_bad[0, 10] = -10.0
+        scores_bad[0, 20] = -9.0
+        scores_bad[0, 30] = -8.0
+
+        loss_good = model._rs_at_k_loss(scores_good, labels, valid_mask)
+        loss_bad = model._rs_at_k_loss(scores_bad, labels, valid_mask)
+
+        assert loss_good.item() < loss_bad.item(), (
+            f'RS@K should be lower for better ranking: '
+            f'good={loss_good.item():.4f}, bad={loss_bad.item():.4f}'
+        )
+
+    def test_rs_at_k_perfect_ranking_near_zero(self):
+        """When all positives rank well within top-K, RS@K loss ≈ 0.
+
+        With K=50 and only 3 positives among 170 valid tracks,
+        if all 3 have the highest scores, their soft ranks are ~3 << K=50,
+        so σ(τ₁⁻¹ · (K - rank)) ≈ 1 for each, and loss = 1 - RS@K ≈ 0.
+        """
+        model = TrackPreFilter(
+            mode='mlp', input_dim=INPUT_DIM,
+            rs_at_k_weight_start=1.0,
+            rs_at_k_weight_end=1.0,
+            rs_at_k_target=50,
+            rs_at_k_tau1=1.0,
+            rs_at_k_tau2=1.0,
+        )
+        labels = torch.zeros(1, NUM_TRACKS)
+        labels[0, 10] = 1.0
+        labels[0, 20] = 1.0
+        labels[0, 30] = 1.0
+        valid_mask = torch.ones(1, NUM_TRACKS, dtype=torch.bool)
+        valid_mask[:, -30:] = False
+
+        scores = torch.zeros(1, NUM_TRACKS) - 20.0
+        scores[0, 10] = 20.0
+        scores[0, 20] = 19.0
+        scores[0, 30] = 18.0
+
+        loss = model._rs_at_k_loss(scores, labels, valid_mask)
+        assert loss.item() < 0.05, (
+            f'Perfect ranking should give near-zero RS@K loss, got {loss.item():.4f}'
+        )
+
+    def test_rs_at_k_weight_disabled_when_zero(self):
+        """RS@K loss should not appear in total_loss when weight=0."""
+        model = TrackPreFilter(
+            mode='mlp', input_dim=INPUT_DIM,
+            rs_at_k_weight_start=0.0,
+            rs_at_k_weight_end=0.0,
+        )
+        points, features, lorentz_vectors, mask, track_labels = (
+            _make_training_inputs()
+        )
+        loss_dict = model.compute_loss(
+            points, features, lorentz_vectors, mask, track_labels,
+            use_contrastive_denoising=False,
+        )
+        assert 'rs_at_k_loss' not in loss_dict
+
+    def test_rs_at_k_weight_appears_in_loss_dict_when_active(self):
+        """RS@K loss should appear as a separate component when weight > 0."""
+        model = TrackPreFilter(
+            mode='mlp', input_dim=INPUT_DIM,
+            rs_at_k_weight_start=0.0,
+            rs_at_k_weight_end=1.0,
+            rs_at_k_target=50,
+        )
+        model.set_temperature_progress(1.0)
+        points, features, lorentz_vectors, mask, track_labels = (
+            _make_training_inputs()
+        )
+        loss_dict = model.compute_loss(
+            points, features, lorentz_vectors, mask, track_labels,
+            use_contrastive_denoising=False,
+        )
+        assert 'rs_at_k_loss' in loss_dict
+        assert torch.isfinite(loss_dict['rs_at_k_loss']).all()
+
+    def test_rs_at_k_weight_annealing(self):
+        """RS@K weight should interpolate from start to end with progress.
+
+        weight(t) = weight_start + t × (weight_end - weight_start)
+        """
+        model = TrackPreFilter(
+            mode='mlp', input_dim=INPUT_DIM,
+            rs_at_k_weight_start=0.0,
+            rs_at_k_weight_end=2.0,
+        )
+        model.set_temperature_progress(0.0)
+        assert abs(model.current_rs_at_k_weight - 0.0) < 1e-6
+
+        model.set_temperature_progress(0.5)
+        assert abs(model.current_rs_at_k_weight - 1.0) < 1e-6
+
+        model.set_temperature_progress(1.0)
+        assert abs(model.current_rs_at_k_weight - 2.0) < 1e-6
+
+    def test_rs_at_k_hybrid_loss_composition(self):
+        """Total loss should be ranking_loss + weight × rs_at_k_loss."""
+        model = TrackPreFilter(
+            mode='mlp', input_dim=INPUT_DIM,
+            rs_at_k_weight_start=0.5,
+            rs_at_k_weight_end=0.5,
+            rs_at_k_target=50,
+        )
+        points, features, lorentz_vectors, mask, track_labels = (
+            _make_training_inputs()
+        )
+        loss_dict = model.compute_loss(
+            points, features, lorentz_vectors, mask, track_labels,
+            use_contrastive_denoising=False,
+        )
+        expected_total = (
+            loss_dict['ranking_loss'].item()
+            + 0.5 * loss_dict['rs_at_k_loss'].item()
+        )
+        assert abs(loss_dict['total_loss'].item() - expected_total) < 1e-4, (
+            f'Total loss mismatch: {loss_dict["total_loss"].item():.5f} '
+            f'vs expected {expected_total:.5f}'
+        )
+
+    def test_rs_at_k_gradient_flow_through_full_model(self):
+        """RS@K should produce gradients in all model parameters."""
+        model = TrackPreFilter(
+            mode='mlp', input_dim=INPUT_DIM_EXTENDED,
+            hidden_dim=192, num_message_rounds=2,
+            rs_at_k_weight_start=1.0,
+            rs_at_k_weight_end=1.0,
+            rs_at_k_target=50,
+        )
+        points, features, lorentz_vectors, mask, track_labels = (
+            _make_extended_training_inputs()
+        )
+        loss_dict = model.compute_loss(
+            points, features, lorentz_vectors, mask, track_labels,
+            use_contrastive_denoising=False,
+        )
+        loss_dict['total_loss'].backward()
+
+        params_with_grad = sum(
+            1 for _, parameter in model.named_parameters()
+            if parameter.grad is not None and parameter.grad.abs().sum() > 0
+        )
+        total_params = sum(1 for _ in model.parameters())
+        assert params_with_grad >= total_params - 1, (
+            f'Only {params_with_grad}/{total_params} params got gradients '
+            f'with RS@K loss'
+        )
+
+    def test_rs_at_k_no_positives_returns_zero(self):
+        """Events with no GT tracks should contribute zero RS@K loss."""
+        model = TrackPreFilter(
+            mode='mlp', input_dim=INPUT_DIM,
+            rs_at_k_weight_start=1.0,
+            rs_at_k_weight_end=1.0,
+            rs_at_k_target=50,
+        )
+        scores = torch.randn(1, NUM_TRACKS)
+        labels = torch.zeros(1, NUM_TRACKS)
+        valid_mask = torch.ones(1, NUM_TRACKS, dtype=torch.bool)
+
+        loss = model._rs_at_k_loss(scores, labels, valid_mask)
+        assert loss.item() == 0.0
+
+    def test_rs_at_k_tau_parameters_stored(self):
+        """Temperature parameters tau1 and tau2 should be stored on the model."""
+        model = TrackPreFilter(
+            mode='mlp', input_dim=INPUT_DIM,
+            rs_at_k_tau1=0.5,
+            rs_at_k_tau2=0.3,
+            rs_at_k_target=200,
+        )
+        assert model.rs_at_k_tau1 == 0.5
+        assert model.rs_at_k_tau2 == 0.3
+        assert model.rs_at_k_target == 200

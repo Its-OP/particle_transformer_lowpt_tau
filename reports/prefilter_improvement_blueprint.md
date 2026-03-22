@@ -39,18 +39,18 @@
 ## Phase 1: Loss + Training Recipe
 
 ### 1.1 RS@200 Surrogate Loss
-- [ ] Implement `_rs_at_k_loss()` method in `weaver/weaver/nn/model/TrackPreFilter.py`
+- [x] Implement `_rs_at_k_loss()` method in `weaver/weaver/nn/model/TrackPreFilter.py`
   - Two nested sigmoid relaxations:
     - Inner: sigma_tau2(s_pos - s_neg) estimates soft rank of each positive
     - Outer: sigma_tau1(K - soft_rank) gives soft indicator for being in top-K
   - Formula: RS@K = (1/|P|) * sum_p sigma_tau1(K - sum_n sigma_tau2(s_n - s_p))
   - Reference: Patel et al., CVPR 2022 (arXiv:2108.11179)
-- [ ] Add `rs_at_k_weight_start/end` parameters to TrackPreFilter (default 0.0 = disabled)
-- [ ] Add `rs_at_k_target` parameter (default 200)
-- [ ] Add `rs_at_k_tau1`, `rs_at_k_tau2` temperature parameters
-- [ ] Hybrid loss: `L = ranking_loss + weight * RS@200`
-- [ ] Support annealing weight from 0 -> target during training (via set_temperature_progress)
-- [ ] Unit tests: verify RS@K loss is differentiable, decreases with better rankings
+- [x] Add `rs_at_k_weight_start/end` parameters to TrackPreFilter (default 0.0 = disabled)
+- [x] Add `rs_at_k_target` parameter (default 200)
+- [x] Add `rs_at_k_tau1`, `rs_at_k_tau2` temperature parameters
+- [x] Hybrid loss: `L = ranking_loss + weight * RS@200`
+- [x] Support annealing weight from 0 -> target during training (via set_temperature_progress)
+- [x] Unit tests: verify RS@K loss is differentiable, decreases with better rankings
 
 ### 1.2 Curriculum Training with Negative Subsampling
 - [ ] Add `curriculum_num_negatives` parameter to `train_one_epoch()`

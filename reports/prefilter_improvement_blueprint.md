@@ -9,30 +9,30 @@
 ## Phase 0: Validation & Metrics Infrastructure
 
 ### 0.1 Extend `compute_recall_at_k_metrics()` in `part/utils/training_utils.py`
-- [ ] Add K values: (10, 20, 30, 50, 100, 200, 300, 400, 500, 600, 800)
-- [ ] Add GT rank percentiles: p50 (=median), p75, p90, p95
-- [ ] Add per-event breakdown: count events with N/M GT found (at K=200)
-- [ ] Add total_events_with_gt to returned metrics
-- [ ] Return all new metrics in the existing dict
+- [x] Add K values: (10, 20, 30, 50, 100, 200, 300, 400, 500, 600, 800)
+- [x] Add GT rank percentiles: p50 (=median), p75, p90, p95
+- [x] Add per-event breakdown: count events with N/M GT found (at K=200)
+- [x] Add total_events_with_gt to returned metrics
+- [x] Return all new metrics in the existing dict
 
 ### 0.2 Add conditional recall computation (new function)
-- [ ] Create `compute_conditional_recall()` in `part/utils/training_utils.py`
-- [ ] Accepts raw features (pT, dxy_sig) alongside scores/labels/mask
-- [ ] Computes recall by pT bins: [0, 0.3], [0.3, 0.5], [0.5, 1.0], [1.0, 2.0], [2.0+]
-- [ ] Computes recall by |dxy_sig| bins: [0, 0.5], [0.5, 1.0], [1.0, 2.0], [2.0, 5.0], [5.0+]
-- [ ] Computes 2D heatmap: recall in (pT_bin x dxy_sig_bin) grid
-- [ ] Returns dict with all conditional metrics (70 metrics total)
+- [x] Create `compute_conditional_recall()` in `part/utils/training_utils.py`
+- [x] Accepts raw features (pT, dxy_sig) alongside scores/labels/mask
+- [x] Computes recall by pT bins: [0, 0.3], [0.3, 0.5], [0.5, 1.0], [1.0, 2.0], [2.0+]
+- [x] Computes recall by |dxy_sig| bins: [0, 0.5], [0.5, 1.0], [1.0, 2.0], [2.0, 5.0], [5.0+]
+- [x] Computes 2D heatmap: recall in (pT_bin x dxy_sig_bin) grid
+- [x] Returns dict with all conditional metrics (70 metrics total)
 
 ### 0.3 JSON export in training script
-- [ ] Create `save_epoch_metrics()` in `part/utils/training_utils.py`
-- [ ] Saves to `{experiment_dir}/metrics/epoch_{N}.json`
-- [ ] Include: all R@K, P@K, d-prime, median rank, percentiles, per-event breakdown
+- [x] Create `save_epoch_metrics()` in `part/utils/training_utils.py`
+- [x] Saves to `{experiment_dir}/metrics/epoch_{N}.json`
+- [x] Include: all R@K, P@K, d-prime, median rank, percentiles, per-event breakdown
 
 ### 0.4 Update `validate()` in `part/train_prefilter.py`
-- [ ] Pass extended K values (10,20,30,50,100,200,300,400,500,600,800)
-- [ ] Log R@200, R@500, R@600, P@200, d-prime, median rank, p90
-- [ ] Save metrics JSON per epoch
-- [ ] Add unit tests for new metrics functions
+- [x] Pass extended K values (10,20,30,50,100,200,300,400,500,600,800)
+- [x] Log R@200, R@500, R@600, P@200, d-prime, median rank, p90
+- [x] Save metrics JSON per epoch
+- [x] Unit tests: 20 tests in test_extended_metrics.py (TDD — written before implementation)
 
 ---
 

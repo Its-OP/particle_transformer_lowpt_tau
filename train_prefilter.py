@@ -52,9 +52,10 @@ from pretrain_backbone import (
 )
 from utils.training_utils import (
     CheckpointManager,
-    compute_recall_at_k_metrics,
+    MetricsAccumulator,
     extract_label_from_inputs,
     load_network_module,
+    save_epoch_metrics,
     trim_to_max_valid_tracks,
 )
 
@@ -206,11 +207,19 @@ def validate(
     label_input_index: int,
     max_steps: int | None = None,
 ) -> tuple[dict[str, float], dict[str, float]]:
-    """Validate and compute recall@K metrics."""
+    """Validate and compute recall@K metrics with global accumulation.
+
+    Uses MetricsAccumulator to collect raw GT ranks and per-event data
+    across all batches, then computes percentiles and breakdowns from
+    the full distribution (not batch-averaged).
+    """
     model.eval()
     loss_accumulators: dict[str, float] | None = None
-    recall_accumulators: dict[str, float] | None = None
     num_batches = 0
+
+    metrics_accumulator = MetricsAccumulator(
+        k_values=(10, 20, 30, 50, 100, 200, 300, 400, 500, 600, 800),
+    )
 
     with torch.no_grad():
         for batch_index, (X, y, _) in enumerate(val_loader):
@@ -240,21 +249,13 @@ def validate(
             for key in loss_accumulators:
                 loss_accumulators[key] += loss_dict[key].item()
 
-            batch_metrics = compute_recall_at_k_metrics(
-                per_track_scores, track_labels, mask,
-                k_values=(10, 20, 30, 100, 200),
-            )
-
-            if recall_accumulators is None:
-                recall_accumulators = {key: 0 if key == 'total_gt_tracks' else 0.0
-                                       for key in batch_metrics}
-            for key in batch_metrics:
-                recall_accumulators[key] += batch_metrics[key]
+            # Accumulate raw data for global metric computation
+            metrics_accumulator.update(per_track_scores, track_labels, mask)
 
             num_batches += 1
 
             del inputs, model_inputs, track_labels, loss_dict
-            del per_track_scores, batch_metrics
+            del per_track_scores
 
     if loss_accumulators is None:
         loss_accumulators = {'total_loss': 0.0}
@@ -263,14 +264,8 @@ def validate(
         for key, value in loss_accumulators.items()
     }
 
-    if recall_accumulators is None:
-        recall_accumulators = {'total_gt_tracks': 0}
-    metrics = {}
-    for key, value in recall_accumulators.items():
-        if key == 'total_gt_tracks':
-            metrics[key] = value
-        else:
-            metrics[key] = value / max(1, num_batches)
+    # Compute global metrics from accumulated raw data
+    metrics = metrics_accumulator.compute()
 
     return loss_averages, metrics
 
@@ -508,7 +503,10 @@ def main():
     loss_history = {
         'train': [], 'val': [], 'lr': [],
         'recall_at_10': [], 'recall_at_20': [], 'recall_at_30': [],
-        'recall_at_100': [], 'recall_at_200': [], 'd_prime': [], 'median_gt_rank': [],
+        'recall_at_50': [], 'recall_at_100': [], 'recall_at_200': [],
+        'recall_at_300': [], 'recall_at_400': [], 'recall_at_500': [],
+        'recall_at_600': [], 'recall_at_800': [],
+        'd_prime': [], 'median_gt_rank': [],
     }
 
     if args.resume is not None:
@@ -589,13 +587,19 @@ def main():
 
             def _format_metrics(metrics):
                 perfect_200 = metrics.get('perfect_at_200', 0.0)
+                recall_500 = metrics.get('recall_at_500', 0.0)
+                recall_600 = metrics.get('recall_at_600', 0.0)
+                rank_p90 = metrics.get('gt_rank_p90', 0.0)
                 return (
                     f'R@30: {metrics["recall_at_30"]:.4f} | '
                     f'R@100: {metrics["recall_at_100"]:.4f} | '
                     f'R@200: {metrics["recall_at_200"]:.4f} | '
+                    f'R@500: {recall_500:.4f} | '
+                    f'R@600: {recall_600:.4f} | '
                     f'P@200: {perfect_200:.4f} | '
                     f'd\': {metrics["d_prime"]:.3f} | '
-                    f'rank: {metrics["median_gt_rank"]:.0f}'
+                    f'rank: {metrics["median_gt_rank"]:.0f} '
+                    f'(p90={rank_p90:.0f})'
                 )
 
             train_summary = _format_metrics(train_eval_metrics)
@@ -671,6 +675,19 @@ def main():
                         loss_history[history_key] = []
                     loss_history[history_key].append(metric_value)
             save_loss_history(loss_history, experiment_dir)
+
+            # Per-epoch metrics JSON for cross-experiment comparison
+            epoch_metrics = {
+                'epoch': epoch,
+                'train_loss': train_losses['total_loss'],
+                'val_loss': val_loss,
+                'lr': current_lr,
+            }
+            for metric_key, metric_value in val_metrics.items():
+                epoch_metrics[f'val_{metric_key}'] = metric_value
+            for metric_key, metric_value in train_eval_metrics.items():
+                epoch_metrics[f'train_{metric_key}'] = metric_value
+            save_epoch_metrics(epoch_metrics, experiment_dir, epoch)
 
             # Checkpointing
             if epoch % args.save_every == 0 or is_best or epoch == args.epochs:

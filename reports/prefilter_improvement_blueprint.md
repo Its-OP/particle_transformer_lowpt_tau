@@ -53,15 +53,15 @@
 - [ ] Unit tests: verify RS@K loss is differentiable, decreases with better rankings
 
 ### 1.2 Curriculum Training with Negative Subsampling
-- [ ] Add `curriculum_num_negatives` parameter to `train_one_epoch()`
+- [x] Add `curriculum_num_negatives` parameter to `train_one_epoch()`
   - When set, randomly subsample N background tracks per event (keep all GT)
   - Implemented as mask modification before compute_loss()
-- [ ] Add curriculum schedule to main training loop:
+- [x] Add curriculum schedule to main training loop:
   - Phase A (epochs 0 to E/3): subsample to ~30 background tracks per event
   - Phase B (epochs E/3 to 2E/3): cosine increase from 30 -> full
   - Phase C (epochs 2E/3 to E): full tracks, activate RS@200, DRW
-- [ ] Add `--curriculum` flag to `train_prefilter.py`
-- [ ] Unit tests: verify subsampling preserves all GT tracks, correct count
+- [x] Add `--curriculum` flag to `train_prefilter.py`
+- [x] Unit tests: verify subsampling preserves all GT tracks, correct count
 
 ---
 

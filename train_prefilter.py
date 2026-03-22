@@ -54,8 +54,10 @@ from utils.training_utils import (
     CheckpointManager,
     MetricsAccumulator,
     extract_label_from_inputs,
+    get_curriculum_num_negatives,
     load_network_module,
     save_epoch_metrics,
+    subsample_negatives,
     trim_to_max_valid_tracks,
 )
 
@@ -77,6 +79,7 @@ def train_one_epoch(
     mask_input_index: int,
     label_input_index: int,
     grad_clip_max_norm: float = 1.0,
+    curriculum_num_negatives: int | None = None,
 ) -> tuple[dict[str, float], int]:
     """Train for one epoch."""
     model.train()
@@ -105,6 +108,13 @@ def train_one_epoch(
             inputs, label_input_index,
         )
         points, features, lorentz_vectors, mask = model_inputs
+
+        # Curriculum negative subsampling: reduce background tracks per event
+        # to increase the effective positive-to-negative ratio early in training.
+        if curriculum_num_negatives is not None:
+            mask = subsample_negatives(
+                mask, track_labels, num_negatives=curriculum_num_negatives,
+            )
 
         optimizer.zero_grad(set_to_none=True)
 
@@ -305,6 +315,13 @@ def main():
     parser.add_argument('--save-every', type=int, default=5)
     parser.add_argument('--keep-best-k', type=int, default=5)
     parser.add_argument('--resume', type=str, default=None)
+    parser.add_argument('--curriculum', action='store_true',
+                        help='Enable curriculum negative subsampling: '
+                             'Phase A (0→E/3) subsample to 30 negatives, '
+                             'Phase B (E/3→2E/3) cosine increase to full, '
+                             'Phase C (2E/3→E) full tracks.')
+    parser.add_argument('--curriculum-min-negatives', type=int, default=30,
+                        help='Min negatives per event in Phase A (default: 30)')
 
     args = parser.parse_args()
     device = torch.device(args.device)
@@ -544,11 +561,26 @@ def main():
             drw_now_active = epoch > drw_warmup_epochs
             original_model.set_drw_active(drw_now_active)
 
+            # Curriculum negative subsampling schedule
+            curriculum_num_negatives = None
+            if args.curriculum:
+                curriculum_num_negatives = get_curriculum_num_negatives(
+                    epoch - 1,  # 0-indexed for the schedule
+                    args.epochs,
+                    min_negatives=args.curriculum_min_negatives,
+                )
+
+            curriculum_status = (
+                f'neg={curriculum_num_negatives}'
+                if curriculum_num_negatives is not None
+                else 'full'
+            )
             logger.info(
                 f'Schedule | T={original_model.current_ranking_temperature:.3f}'
                 f' | σ={original_model.current_denoising_sigma:.3f}'
                 f' | DRW={"ON" if drw_now_active else "off"}'
-                f' (warmup={drw_warmup_epochs})',
+                f' (warmup={drw_warmup_epochs})'
+                f' | curriculum={curriculum_status}',
             )
 
             train_losses, global_batch_count = train_one_epoch(
@@ -557,6 +589,7 @@ def main():
                 tensorboard_writer, global_batch_count,
                 steps_per_epoch, mask_input_index, label_input_index,
                 grad_clip_max_norm=args.grad_clip,
+                curriculum_num_negatives=curriculum_num_negatives,
             )
 
             eval_steps = max(1, steps_per_epoch // 4)

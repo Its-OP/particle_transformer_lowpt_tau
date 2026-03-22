@@ -65,6 +65,104 @@ def trim_to_max_valid_tracks(
     return [tensor[:, :, :max_valid_tracks] for tensor in inputs]
 
 
+def subsample_negatives(
+    mask: torch.Tensor,
+    track_labels: torch.Tensor,
+    num_negatives: int,
+) -> torch.Tensor:
+    """Subsample background tracks while preserving all GT tracks.
+
+    For curriculum training (CASED, MICCAI 2017): start with a small set of
+    negatives so the model sees a higher positive-to-negative ratio, then
+    gradually increase to the full track set.
+
+    Args:
+        mask: (B, 1, P) validity mask.
+        track_labels: (B, 1, P) binary labels (1.0 = GT, 0.0 = background).
+        num_negatives: Number of background tracks to keep per event.
+            If more than available, all negatives are kept.
+
+    Returns:
+        New mask tensor (B, 1, P) with subsampled negatives.
+        Original mask is not modified.
+    """
+    batch_size, _, num_tracks = mask.shape
+    subsampled_mask = mask.clone()
+
+    for event_index in range(batch_size):
+        event_mask = mask[event_index, 0].bool()
+        event_labels = track_labels[event_index, 0]
+
+        # Identify valid negative (background) track indices
+        negative_indices = (
+            (event_labels == 0.0) & event_mask
+        ).nonzero(as_tuple=True)[0]
+
+        if len(negative_indices) <= num_negatives:
+            continue
+
+        # Randomly select which negatives to KEEP
+        permutation = torch.randperm(
+            len(negative_indices), device=mask.device,
+        )
+        discard_indices = negative_indices[permutation[num_negatives:]]
+
+        # Mask out the discarded negatives
+        subsampled_mask[event_index, 0, discard_indices] = 0.0
+
+    return subsampled_mask
+
+
+def get_curriculum_num_negatives(
+    epoch: int,
+    total_epochs: int,
+    min_negatives: int = 30,
+    max_negatives: int | None = None,
+) -> int | None:
+    """Compute the number of negatives for curriculum training at a given epoch.
+
+    Three-phase schedule:
+        Phase A (epochs 0 to E/3):     fixed at min_negatives (easy task)
+        Phase B (epochs E/3 to 2E/3):  cosine increase from min → max/full
+            n(t) = min + (max - min) × 0.5 × (1 - cos(πt))
+        Phase C (epochs 2E/3 to E):    None (full tracks, no subsampling)
+
+    Args:
+        epoch: Current epoch (0-indexed).
+        total_epochs: Total number of training epochs.
+        min_negatives: Number of negatives in Phase A (default: 30).
+        max_negatives: Max negatives at end of Phase B. None = full
+            (returns None at Phase B end, same as Phase C).
+
+    Returns:
+        Number of negatives to subsample, or None for no subsampling.
+    """
+    phase_a_end = total_epochs // 3
+    phase_b_end = 2 * total_epochs // 3
+
+    if epoch < phase_a_end:
+        return min_negatives
+
+    if epoch >= phase_b_end:
+        return None
+
+    # Phase B: cosine ramp from min_negatives → max_negatives
+    phase_b_length = max(1, phase_b_end - phase_a_end)
+    progress = (epoch - phase_a_end) / phase_b_length
+
+    if max_negatives is None:
+        # No explicit max → ramp towards a large number; subsample_negatives
+        # will clamp to actual track count if it exceeds available negatives.
+        effective_max = 10000
+    else:
+        effective_max = max_negatives
+
+    # n(t) = min + (max - min) × 0.5 × (1 - cos(πt))
+    cosine_factor = 0.5 * (1.0 - math.cos(math.pi * progress))
+    num_negatives = min_negatives + (effective_max - min_negatives) * cosine_factor
+    return int(round(num_negatives))
+
+
 def load_network_module(network_path: str):
     """Load get_model() from the network wrapper file.
 

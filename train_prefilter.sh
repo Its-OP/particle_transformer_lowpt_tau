@@ -107,7 +107,8 @@ TRAIN_CMD="${CONDA_INIT} && cd ${SCRIPT_DIR} && python train_prefilter.py \
     --device ${DEVICE} \
     --num-workers ${NUM_WORKERS} \
     --keep-best-k ${KEEP_BEST_K} \
-    --amp"
+    --amp \
+    --curriculum"
 
 # Disable torch.compile if requested
 if [ "$NO_COMPILE" = true ]; then

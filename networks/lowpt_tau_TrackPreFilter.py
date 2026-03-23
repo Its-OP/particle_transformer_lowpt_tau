@@ -53,6 +53,14 @@ def get_model(data_config, **kwargs):
         # Uniform weights for 30% of training, then 2× upweight positives
         drw_warmup_fraction=0.3,
         drw_positive_weight=2.0,
+        # RS@K surrogate loss (Patel et al., CVPR 2022, arXiv:2108.11179):
+        # Anneals from 0 → 0.5 over training via set_temperature_progress.
+        # Directly optimizes differentiable Recall@200 alongside ranking loss.
+        rs_at_k_weight_start=0.0,
+        rs_at_k_weight_end=0.5,
+        rs_at_k_target=200,
+        rs_at_k_tau1=1.0,
+        rs_at_k_tau2=1.0,
     )
     configuration.update(**kwargs)
     _logger.info('TrackPreFilter config: %s' % str(configuration))

@@ -1,5 +1,8 @@
 .DS_Store
 
+# Weaver auto-generated preprocessing configs (machine-specific stats)
+*.auto.yaml
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

@@ -252,18 +252,34 @@ def validate(
             for key in loss_accumulators:
                 loss_accumulators[key] += loss_dict[key].item()
 
-            # Metrics on the filtered set (K1 tracks)
-            # Need to get the filtered mask and labels from the cascade
-            # The scores are (B, K1), we need matching mask and labels
+            # End-to-end metrics: GT found in Stage 2's top-K / GT in FULL event.
+            # MetricsAccumulator counts GT based on the labels it receives.
+            # We pass the ORIGINAL labels (full event GT count as denominator)
+            # but with Stage 2 scores mapped back: tracks not in top-K1 get -inf.
+            #
+            # This makes R@200 = "fraction of all GT tracks that ended up in
+            # Stage 2's top-200" — the true end-to-end metric.
             filtered = model._run_stage1(
                 points, features, lorentz_vectors, mask, track_labels,
             )
-            filtered_mask = filtered['mask']
-            filtered_labels = filtered['track_labels']
 
-            metrics_accumulator.update(
-                per_track_scores, filtered_labels, filtered_mask,
-            )
+            # Build full-event score tensor: (B, P) with -inf for tracks
+            # not selected by Stage 1, and Stage 2 scores for selected tracks.
+            full_scores = torch.full_like(
+                mask.squeeze(1), float('-inf'),
+            )  # (B, P)
+            # Get the indices that Stage 1 selected
+            with torch.no_grad():
+                stage1_scores_all = model.stage1(
+                    points, features, lorentz_vectors, mask,
+                )
+                selected_indices = model.stage1.select_top_k(
+                    stage1_scores_all, mask, model.top_k1,
+                )  # (B, K1)
+            # Scatter Stage 2 scores back to full-event positions
+            full_scores.scatter_(1, selected_indices, per_track_scores)
+
+            metrics_accumulator.update(full_scores, track_labels, mask)
 
             num_batches += 1
 

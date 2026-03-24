@@ -2,162 +2,38 @@
 
 Builds a CascadeModel from:
     - Stage 1: frozen TrackPreFilter loaded from checkpoint
-    - Stage 2: pluggable reranker architecture (placeholder until Track A/B/C)
+    - Stage 2: CascadeReranker (ParT-style pairwise-bias self-attention)
 
 Usage:
     python train_cascade.py --network networks/lowpt_tau_CascadeReranker.py \
         --stage1-checkpoint models/prefilter_best.pt --top-k1 600
 """
 import torch
-import torch.nn as nn
 
 from weaver.nn.model.CascadeModel import CascadeModel
+from weaver.nn.model.CascadeReranker import CascadeReranker
 from weaver.nn.model.TrackPreFilter import TrackPreFilter
 from weaver.utils.logger import _logger
 
 
-class PlaceholderStage2(nn.Module):
-    """Minimal Stage 2 reranker: MLP on per-track features + stage1_scores.
-
-    This is a temporary placeholder until CascadeReranker (Track A) is
-    implemented. It verifies the cascade pipeline works end-to-end.
-
-    Architecture: cat(features, stage1_score) → MLP → per-track score.
-    Trained with ranking loss (same as TrackPreFilter).
-    """
-
-    def __init__(
-        self,
-        input_dim: int = 16,
-        hidden_dim: int = 128,
-        ranking_num_samples: int = 50,
-        ranking_temperature: float = 1.0,
-    ):
-        super().__init__()
-        self.ranking_num_samples = ranking_num_samples
-        self.ranking_temperature = ranking_temperature
-
-        # +1 for stage1_score channel
-        self.mlp = nn.Sequential(
-            nn.Conv1d(input_dim + 1, hidden_dim, kernel_size=1, bias=False),
-            nn.BatchNorm1d(hidden_dim),
-            nn.ReLU(),
-            nn.Conv1d(hidden_dim, hidden_dim, kernel_size=1, bias=False),
-            nn.BatchNorm1d(hidden_dim),
-            nn.ReLU(),
-            nn.Conv1d(hidden_dim, 1, kernel_size=1),
-        )
-
-    def forward(
-        self,
-        points: torch.Tensor,
-        features: torch.Tensor,
-        lorentz_vectors: torch.Tensor,
-        mask: torch.Tensor,
-        stage1_scores: torch.Tensor,
-    ) -> torch.Tensor:
-        """Score each track in the filtered set.
-
-        Args:
-            points: (B, 2, K1) coordinates.
-            features: (B, input_dim, K1) per-track features.
-            lorentz_vectors: (B, 4, K1) 4-vectors.
-            mask: (B, 1, K1) validity mask.
-            stage1_scores: (B, K1) scores from Stage 1.
-
-        Returns:
-            scores: (B, K1) per-track scores.
-        """
-        valid_mask = mask.squeeze(1).bool()
-
-        # Concatenate stage1 scores as an extra feature channel
-        stage1_channel = stage1_scores.unsqueeze(1)  # (B, 1, K1)
-        combined = torch.cat([features, stage1_channel], dim=1)
-
-        scores = self.mlp(combined * mask.float()).squeeze(1)
-        scores = scores.masked_fill(~valid_mask, float('-inf'))
-        return scores
-
-    def compute_loss(
-        self,
-        points: torch.Tensor,
-        features: torch.Tensor,
-        lorentz_vectors: torch.Tensor,
-        mask: torch.Tensor,
-        track_labels: torch.Tensor,
-        stage1_scores: torch.Tensor,
-    ) -> dict[str, torch.Tensor]:
-        """Compute ranking loss on filtered tracks.
-
-        Same temperature-scaled pairwise ranking loss as TrackPreFilter:
-            L = T × softplus((s_neg - s_pos) / T)
-        """
-        scores = self.forward(
-            points, features, lorentz_vectors, mask, stage1_scores,
-        )
-        valid_mask = mask.squeeze(1).bool()
-        labels = track_labels.squeeze(1)[:, :scores.shape[1]] * valid_mask.float()
-
-        batch_size = scores.shape[0]
-        temperature = self.ranking_temperature
-        event_losses = []
-
-        for event_index in range(batch_size):
-            event_scores = scores[event_index]
-            event_labels = labels[event_index]
-            event_valid = valid_mask[event_index]
-
-            positive_indices = (
-                (event_labels == 1.0) & event_valid
-            ).nonzero(as_tuple=True)[0]
-            negative_indices = (
-                (event_labels == 0.0) & event_valid
-            ).nonzero(as_tuple=True)[0]
-
-            if len(positive_indices) == 0 or len(negative_indices) == 0:
-                continue
-
-            num_samples = min(self.ranking_num_samples, len(negative_indices))
-            sample_idx = torch.randint(
-                0, len(negative_indices), (num_samples,),
-                device=scores.device,
-            )
-            sampled_negatives = negative_indices[sample_idx]
-
-            positive_scores = event_scores[positive_indices].unsqueeze(1)
-            negative_scores = event_scores[sampled_negatives].unsqueeze(0)
-
-            # L = T × log(1 + exp((s_neg - s_pos) / T))
-            scaled_margin = (negative_scores - positive_scores) / temperature
-            pairwise_loss = temperature * torch.nn.functional.softplus(scaled_margin)
-            event_losses.append(pairwise_loss.mean())
-
-        if not event_losses:
-            ranking_loss = torch.tensor(0.0, device=scores.device, dtype=scores.dtype)
-        else:
-            ranking_loss = torch.stack(event_losses).mean()
-
-        return {
-            'total_loss': ranking_loss,
-            'ranking_loss': ranking_loss,
-            '_scores': scores,
-        }
-
-
 def get_model(data_config, **kwargs):
-    """Build CascadeModel with frozen Stage 1 + Stage 2 reranker.
+    """Build CascadeModel with frozen Stage 1 + CascadeReranker Stage 2.
 
     Required kwargs (passed via train_cascade.py):
         stage1_checkpoint: Path to trained Stage 1 checkpoint.
         top_k1: Number of tracks to pass from Stage 1 to Stage 2.
-
-    Optional kwargs:
-        stage2_hidden_dim: Hidden dimension for Stage 2 MLP (default: 128).
     """
     # Pop cascade-specific args
     stage1_checkpoint = kwargs.pop('stage1_checkpoint', None)
     top_k1 = kwargs.pop('top_k1', 600)
-    stage2_hidden_dim = kwargs.pop('stage2_hidden_dim', 128)
+
+    # Stage 2 architecture args (from train_cascade.py --stage2-* flags)
+    stage2_embed_dim = kwargs.pop('stage2_embed_dim', 128)
+    stage2_num_heads = kwargs.pop('stage2_num_heads', 4)
+    stage2_num_layers = kwargs.pop('stage2_num_layers', 3)
+    stage2_pair_embed_dims = kwargs.pop('stage2_pair_embed_dims', [64, 64])
+    stage2_ffn_ratio = kwargs.pop('stage2_ffn_ratio', 4)
+    stage2_dropout = kwargs.pop('stage2_dropout', 0.1)
 
     # Pop unused args from other heads
     for unused_arg in [
@@ -193,13 +69,21 @@ def get_model(data_config, **kwargs):
     stage1_params = sum(p.numel() for p in stage1.parameters())
     _logger.info(f'Stage 1: {stage1_params:,} params (frozen)')
 
-    # ---- Stage 2: placeholder reranker ----
-    stage2 = PlaceholderStage2(
+    # ---- Stage 2: CascadeReranker (ParT-style pairwise-bias attention) ----
+    stage2 = CascadeReranker(
         input_dim=input_dim,
-        hidden_dim=stage2_hidden_dim,
+        embed_dim=stage2_embed_dim,
+        num_heads=stage2_num_heads,
+        num_layers=stage2_num_layers,
+        pair_input_dim=4,           # ln kT, ln z, ln ΔR, ln m²
+        pair_embed_dims=stage2_pair_embed_dims,
+        ffn_ratio=stage2_ffn_ratio,
+        dropout=stage2_dropout,
+        ranking_num_samples=50,
+        ranking_temperature=1.0,
     )
     stage2_params = sum(p.numel() for p in stage2.parameters())
-    _logger.info(f'Stage 2 (placeholder): {stage2_params:,} params (trainable)')
+    _logger.info(f'Stage 2 (CascadeReranker): {stage2_params:,} params (trainable)')
 
     # ---- Cascade ----
     model = CascadeModel(stage1=stage1, stage2=stage2, top_k1=top_k1)

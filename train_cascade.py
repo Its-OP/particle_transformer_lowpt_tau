@@ -323,6 +323,20 @@ def main():
     parser.add_argument('--keep-best-k', type=int, default=5)
     parser.add_argument('--resume', type=str, default=None)
 
+    # Stage 2 architecture (passed through to network wrapper)
+    parser.add_argument('--stage2-embed-dim', type=int, default=128,
+                        help='Transformer embedding dimension (default: 128)')
+    parser.add_argument('--stage2-num-heads', type=int, default=4,
+                        help='Number of attention heads (default: 4)')
+    parser.add_argument('--stage2-num-layers', type=int, default=3,
+                        help='Number of transformer blocks (default: 3)')
+    parser.add_argument('--stage2-pair-embed-dims', type=str, default='64,64',
+                        help='Comma-separated pair embed MLP dims (default: 64,64)')
+    parser.add_argument('--stage2-ffn-ratio', type=int, default=4,
+                        help='Feed-forward expansion ratio (default: 4)')
+    parser.add_argument('--stage2-dropout', type=float, default=0.1,
+                        help='Dropout rate (default: 0.1)')
+
     args = parser.parse_args()
     device = torch.device(args.device)
 
@@ -426,10 +440,17 @@ def main():
 
     # ---- Model ----
     network_module = load_network_module(args.network)
+    pair_embed_dims = [int(x) for x in args.stage2_pair_embed_dims.split(',')]
     model, model_info = network_module.get_model(
         data_config,
         stage1_checkpoint=args.stage1_checkpoint,
         top_k1=args.top_k1,
+        stage2_embed_dim=args.stage2_embed_dim,
+        stage2_num_heads=args.stage2_num_heads,
+        stage2_num_layers=args.stage2_num_layers,
+        stage2_pair_embed_dims=pair_embed_dims,
+        stage2_ffn_ratio=args.stage2_ffn_ratio,
+        stage2_dropout=args.stage2_dropout,
     )
     model = model.to(device)
 

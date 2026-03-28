@@ -367,13 +367,17 @@ class MetricsAccumulator:
             gt_positions = labels_flat[batch_index].nonzero(as_tuple=True)[0]
             num_gt = len(gt_positions)
 
-            # Collect scores for d-prime
+            # Collect scores for d-prime (exclude -inf scores, which arise
+            # from cascade models where non-selected tracks get -inf)
             event_valid = valid_mask[batch_index]
             event_labels = labels_flat[batch_index]
             event_scores = per_track_scores[batch_index]
+            finite_scores_mask = torch.isfinite(event_scores)
 
-            gt_mask = (event_labels == 1.0) & event_valid
-            background_mask = (event_labels == 0.0) & event_valid
+            gt_mask = (event_labels == 1.0) & event_valid & finite_scores_mask
+            background_mask = (
+                (event_labels == 0.0) & event_valid & finite_scores_mask
+            )
 
             if gt_mask.any():
                 self.all_gt_scores.append(event_scores[gt_mask].cpu())

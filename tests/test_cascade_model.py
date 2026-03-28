@@ -273,6 +273,66 @@ class TestCascadeFiltering:
         assert filtered['mask'].shape[2] == TOP_K1
         assert filtered['track_labels'].shape[2] == TOP_K1
 
+    def test_selected_indices_returned(self):
+        """_run_stage1 should return selected_indices for metric scatter."""
+        model = _make_cascade()
+        points, features, lorentz_vectors, mask, track_labels = _make_inputs()
+
+        filtered = model._run_stage1(
+            points, features, lorentz_vectors, mask, track_labels,
+        )
+        assert 'selected_indices' in filtered
+        assert filtered['selected_indices'].shape == (BATCH_SIZE, TOP_K1)
+        # Indices should be in valid range [0, NUM_TRACKS)
+        assert (filtered['selected_indices'] >= 0).all()
+        assert (filtered['selected_indices'] < NUM_TRACKS).all()
+
+    def test_end_to_end_recall_uses_full_event_gt(self):
+        """End-to-end recall must count GT tracks from the FULL event, not
+        just those that survived Stage 1 filtering.
+
+        If 3 GT pions exist in the full event but Stage 1 only selects 2,
+        the recall denominator should still be 3.
+        """
+        model = _make_cascade()
+        points, features, lorentz_vectors, mask, track_labels = _make_inputs()
+
+        # Get cascade output
+        with torch.no_grad():
+            filtered = model._run_stage1(
+                points, features, lorentz_vectors, mask, track_labels,
+            )
+            stage2_scores = model.stage2(
+                filtered['points'], filtered['features'],
+                filtered['lorentz_vectors'], filtered['mask'],
+                filtered['stage1_scores'],
+            )
+
+        # Scatter Stage 2 scores back to full positions
+        full_scores = torch.full(
+            (BATCH_SIZE, NUM_TRACKS), float('-inf'),
+        )
+        full_scores.scatter_(
+            1, filtered['selected_indices'], stage2_scores,
+        )
+
+        # Count GT in full event
+        full_gt_count = (
+            (track_labels.squeeze(1) == 1.0)
+            & mask.squeeze(1).bool()
+        ).sum(dim=1)  # Should be 3 per event
+
+        # Count GT in Stage 2's top-K (e.g. top-30 within K1=60)
+        from utils.training_utils import MetricsAccumulator
+        accumulator = MetricsAccumulator(k_values=(30,))
+        accumulator.update(full_scores, track_labels, mask)
+        metrics = accumulator.compute()
+
+        # Denominator should be 3 (full event GT count), not fewer
+        assert metrics['total_gt_tracks'] == int(full_gt_count.sum().item())
+        # Recall should be in [0, 1]
+        assert 0.0 <= metrics['recall_at_30'] <= 1.0
+
     def test_stage1_scores_passed_to_stage2(self):
         """Stage 2 should receive stage1_scores as input."""
         # Use a Stage 2 that records its inputs

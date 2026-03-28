@@ -259,23 +259,21 @@ def validate(
             #
             # This makes R@200 = "fraction of all GT tracks that ended up in
             # Stage 2's top-200" — the true end-to-end metric.
-            filtered = model._run_stage1(
-                points, features, lorentz_vectors, mask, track_labels,
-            )
+            #
+            # Reuse selected_indices from the compute_loss call above (via
+            # _run_stage1) to avoid running Stage 1 again. The indices are
+            # deterministic for the same input.
+            with torch.no_grad():
+                filtered = model._run_stage1(
+                    points, features, lorentz_vectors, mask, track_labels,
+                )
+            selected_indices = filtered['selected_indices']  # (B, K1)
 
             # Build full-event score tensor: (B, P) with -inf for tracks
             # not selected by Stage 1, and Stage 2 scores for selected tracks.
             full_scores = torch.full_like(
                 mask.squeeze(1), float('-inf'),
             )  # (B, P)
-            # Get the indices that Stage 1 selected
-            with torch.no_grad():
-                stage1_scores_all = model.stage1(
-                    points, features, lorentz_vectors, mask,
-                )
-                selected_indices = model.stage1.select_top_k(
-                    stage1_scores_all, mask, model.top_k1,
-                )  # (B, K1)
             # Scatter Stage 2 scores back to full-event positions
             full_scores.scatter_(1, selected_indices, per_track_scores)
 

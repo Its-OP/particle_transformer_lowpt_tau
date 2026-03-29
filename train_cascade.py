@@ -350,6 +350,11 @@ def main():
                         help='Feed-forward expansion ratio (default: 4)')
     parser.add_argument('--stage2-dropout', type=float, default=0.1,
                         help='Dropout rate (default: 0.1)')
+    parser.add_argument('--stage2-pair-extra-dim', type=int, default=5,
+                        help='Physics pairwise features: 5=all, 0=disabled (default: 5)')
+    parser.add_argument('--stage2-pair-embed-mode', type=str, default='concat',
+                        choices=['concat', 'sum'],
+                        help='How to combine LV and physics pairwise features (default: concat)')
 
     args = parser.parse_args()
     device = torch.device(args.device)
@@ -463,6 +468,8 @@ def main():
         stage2_num_heads=args.stage2_num_heads,
         stage2_num_layers=args.stage2_num_layers,
         stage2_pair_embed_dims=pair_embed_dims,
+        stage2_pair_extra_dim=args.stage2_pair_extra_dim,
+        stage2_pair_embed_mode=args.stage2_pair_embed_mode,
         stage2_ffn_ratio=args.stage2_ffn_ratio,
         stage2_dropout=args.stage2_dropout,
     )

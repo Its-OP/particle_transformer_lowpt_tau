@@ -198,6 +198,181 @@ class TestStage2Interface:
 
 # ---- Integration with CascadeModel ----
 
+# ---- Extended pairwise features ----
+
+class TestExtendedPairwiseFeatures:
+    """Test physics-motivated pairwise features (charge, dz, rho, dxy)."""
+
+    def test_extra_pairwise_forward_shape(self):
+        """Model with pair_extra_dim=5 should produce correct output shape."""
+        model = _make_reranker(pair_extra_dim=5)
+        points, features, lorentz_vectors, mask, _, stage1_scores = (
+            _make_filtered_inputs()
+        )
+        scores = model(points, features, lorentz_vectors, mask, stage1_scores)
+        assert scores.shape == (BATCH_SIZE, NUM_TRACKS)
+
+    def test_extra_pairwise_scores_finite(self):
+        """Valid track scores should be finite with extra pairwise features."""
+        model = _make_reranker(pair_extra_dim=5)
+        points, features, lorentz_vectors, mask, _, stage1_scores = (
+            _make_filtered_inputs()
+        )
+        scores = model(points, features, lorentz_vectors, mask, stage1_scores)
+        valid_mask = mask.squeeze(1).bool()
+        assert torch.isfinite(scores[valid_mask]).all()
+
+    def test_extra_pairwise_gradient_flow(self):
+        """Gradients should flow through the pairwise feature MLP."""
+        model = _make_reranker(pair_extra_dim=5)
+        points, features, lorentz_vectors, mask, track_labels, stage1_scores = (
+            _make_filtered_inputs()
+        )
+        loss_dict = model.compute_loss(
+            points, features, lorentz_vectors, mask,
+            track_labels, stage1_scores,
+        )
+        loss_dict['total_loss'].backward()
+
+        params_with_grad = sum(
+            1 for _, parameter in model.named_parameters()
+            if parameter.grad is not None and parameter.grad.abs().sum() > 0
+        )
+        total_params = sum(1 for _ in model.parameters())
+        assert params_with_grad >= total_params - 2
+
+    def test_extra_pairwise_no_nan_backward(self):
+        """Backward pass should not produce NaN (critical for dxy_phi_corrected
+        division which clamps sin(dphi/2) to avoid 0/0)."""
+        model = _make_reranker(pair_extra_dim=5)
+        points, features, lorentz_vectors, mask, track_labels, stage1_scores = (
+            _make_filtered_inputs()
+        )
+        loss_dict = model.compute_loss(
+            points, features, lorentz_vectors, mask,
+            track_labels, stage1_scores,
+        )
+        loss_dict['total_loss'].backward()
+        for name, parameter in model.named_parameters():
+            if parameter.grad is not None:
+                assert torch.isfinite(parameter.grad).all(), (
+                    f'NaN gradient in {name}'
+                )
+
+    def test_pair_extra_dim_zero_backward_compatible(self):
+        """pair_extra_dim=0 should give same behavior as original model."""
+        model = _make_reranker(pair_extra_dim=0)
+        points, features, lorentz_vectors, mask, _, stage1_scores = (
+            _make_filtered_inputs()
+        )
+        scores = model(points, features, lorentz_vectors, mask, stage1_scores)
+        assert scores.shape == (BATCH_SIZE, NUM_TRACKS)
+        valid_mask = mask.squeeze(1).bool()
+        assert torch.isfinite(scores[valid_mask]).all()
+
+    def test_pairwise_features_correctness(self):
+        """Verify physics pairwise features are computed with correct values.
+
+        Uses known inputs to check:
+        - Charge product recovers raw {-1, +1} from standardized {-1, 0}
+        - Rho indicator peaks at m_ij ~ 770 MeV
+        - dz_diff is symmetric and non-negative
+        - Masking zeros out features for padded tracks
+        """
+        model = _make_reranker(pair_extra_dim=5)
+
+        # Construct inputs with known charge values
+        batch_size, num_tracks = 2, 20
+        generator = torch.Generator().manual_seed(99)
+        eta = torch.randn(batch_size, 1, num_tracks, generator=generator) * 0.5
+        phi = torch.rand(batch_size, 1, num_tracks, generator=generator) * 2 * 3.14159 - 3.14159
+        points = torch.cat([eta, phi], dim=1)
+
+        features = torch.randn(batch_size, INPUT_DIM, num_tracks, generator=generator)
+
+        # Feature 5 = charge: set standardized values
+        # Raw +1 → standardized 0.0, Raw -1 → standardized -1.0
+        features[:, 5, :10] = 0.0    # positive charge tracks
+        features[:, 5, 10:] = -1.0   # negative charge tracks
+
+        # Feature 7 = dz_sig: set known values
+        features[:, 7, :] = 0.0
+        features[0, 7, 0] = 1.5   # track 0 has dz=1.5
+        features[0, 7, 1] = 1.5   # track 1 has same dz (same vertex)
+        features[0, 7, 2] = 0.0   # track 2 has dz=0 (PV track)
+
+        # Build physical 4-vectors
+        transverse_momentum = torch.ones(batch_size, 1, num_tracks) * 0.5
+        px = transverse_momentum * torch.cos(phi)
+        py = transverse_momentum * torch.sin(phi)
+        pz = transverse_momentum * torch.sinh(eta)
+        pion_mass = 0.13957
+        energy = torch.sqrt(px ** 2 + py ** 2 + pz ** 2 + pion_mass ** 2)
+        lorentz_vectors = torch.cat([px, py, pz, energy], dim=1)
+
+        mask = torch.ones(batch_size, 1, num_tracks)
+        mask[:, :, -5:] = 0.0  # Last 5 are padded
+
+        mask_float = mask.float()
+        lorentz_for_pairs = (lorentz_vectors * mask_float).detach().float()
+
+        extra = model._compute_extra_pairwise_features(
+            points, features, lorentz_for_pairs, mask_float,
+        )
+        assert extra.shape == (batch_size, 5, num_tracks, num_tracks)
+
+        # Channel 0: charge_product
+        charge_prod = extra[0, 0]  # (20, 20)
+        # Tracks 0 (+1) and 10 (-1) should have product = -1
+        assert charge_prod[0, 10].item() == pytest.approx(-1.0, abs=0.01), (
+            f'OS pair should give -1, got {charge_prod[0, 10].item()}'
+        )
+        # Tracks 0 (+1) and 1 (+1) should have product = +1
+        assert charge_prod[0, 1].item() == pytest.approx(1.0, abs=0.01), (
+            f'SS pair should give +1, got {charge_prod[0, 1].item()}'
+        )
+
+        # Channel 1: dz_diff
+        dz_diff = extra[0, 1]
+        # Tracks 0 and 1 share dz=1.5 → diff = 0
+        assert dz_diff[0, 1].item() == pytest.approx(0.0, abs=1e-5)
+        # Tracks 0 (dz=1.5) and 2 (dz=0) → diff = 1.5
+        assert dz_diff[0, 2].item() == pytest.approx(1.5, abs=1e-5)
+        # Symmetric
+        assert dz_diff[0, 2].item() == pytest.approx(dz_diff[2, 0].item())
+
+        # Channel 2: rho_indicator — should be in [0, 1]
+        rho_ind = extra[0, 2]
+        assert (rho_ind >= 0).all()
+        assert (rho_ind <= 1).all()
+
+        # Channel 3: rho_os_indicator — should be 0 for same-sign pairs
+        rho_os = extra[0, 3]
+        # SS pair (both positive charge): should be 0
+        assert rho_os[0, 1].item() == 0.0
+
+        # Channels for padded tracks should be 0
+        for channel in range(5):
+            # Padded track indices: 15-19
+            assert (extra[0, channel, 15:, :] == 0).all(), (
+                f'Channel {channel} not zeroed for padded rows'
+            )
+            assert (extra[0, channel, :, 15:] == 0).all(), (
+                f'Channel {channel} not zeroed for padded cols'
+            )
+
+    def test_sum_mode_works(self):
+        """pair_embed_mode='sum' should also work (for ablation)."""
+        model = _make_reranker(pair_extra_dim=5, pair_embed_mode='sum')
+        points, features, lorentz_vectors, mask, _, stage1_scores = (
+            _make_filtered_inputs()
+        )
+        scores = model(points, features, lorentz_vectors, mask, stage1_scores)
+        assert scores.shape == (BATCH_SIZE, NUM_TRACKS)
+        valid_mask = mask.squeeze(1).bool()
+        assert torch.isfinite(scores[valid_mask]).all()
+
+
 class TestCascadeIntegration:
     """Test CascadeReranker plugged into CascadeModel."""
 

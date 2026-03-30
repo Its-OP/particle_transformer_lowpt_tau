@@ -195,9 +195,11 @@ class PerPionCollector:
                 roles[pt_order[1]] = 'middle_pt'
                 roles[pt_order[2]] = 'lowest_pt'
 
+            event_id = len(self.events)
             pion_start = len(self.pions)
             for i, gt_pos in enumerate(gt_positions):
                 self.pions.append({
+                    'event_id': event_id,
                     'pt': gt_pts[i],
                     'dxy_sig': gt_dxy[i],
                     'charge': gt_charge[i],
@@ -261,6 +263,7 @@ def generate_report(
     s1_metrics: dict,
     regular_metrics: dict,
     physics_metrics: dict,
+    stage1_collector: PerPionCollector,
     regular_collector: PerPionCollector,
     physics_collector: PerPionCollector,
     regular_curves: dict | None,
@@ -371,39 +374,37 @@ def generate_report(
     add()
     add('### Found rate by pT bin')
     add()
-    add('| pT range (GeV) | Regular | Physics | Delta |')
-    add('|----------------|---------|---------|-------|')
+    add('| pT range (GeV) | Stage 1 | Regular | Physics |')
+    add('|----------------|---------|---------|---------|')
     pt_bins = [(0, 0.3), (0.3, 0.5), (0.5, 1.0), (1.0, 2.0), (2.0, 100)]
     for lo, hi in pt_bins:
         label = f'[{lo}, {hi})' if hi < 100 else f'[{lo}, +)'
-        reg_found = sum(1 for p in regular_collector.pions if lo <= p['pt'] < hi and p['found_at_200'])
-        reg_total = max(1, sum(1 for p in regular_collector.pions if lo <= p['pt'] < hi))
-        phy_found = sum(1 for p in physics_collector.pions if lo <= p['pt'] < hi and p['found_at_200'])
-        phy_total = max(1, sum(1 for p in physics_collector.pions if lo <= p['pt'] < hi))
-        reg_rate = reg_found / reg_total
-        phy_rate = phy_found / phy_total
-        add(f'| {label} | {reg_rate:.3f} (n={reg_total}) | {phy_rate:.3f} (n={phy_total}) | {phy_rate-reg_rate:+.3f} |')
+        rates = {}
+        for cname, collector in [('s1', stage1_collector), ('reg', regular_collector), ('phy', physics_collector)]:
+            found = sum(1 for p in collector.pions if lo <= p['pt'] < hi and p['found_at_200'])
+            total = max(1, sum(1 for p in collector.pions if lo <= p['pt'] < hi))
+            rates[cname] = (found, total, found / total)
+        add(f'| {label} | {rates["s1"][2]:.3f} (n={rates["s1"][1]}) | {rates["reg"][2]:.3f} | {rates["phy"][2]:.3f} |')
 
     add()
     add('### Found rate by |dxy_sig| bin')
     add()
-    add('| |dxy_sig| range | Regular | Physics | Delta |')
-    add('|----------------|---------|---------|-------|')
+    add('| |dxy_sig| range | Stage 1 | Regular | Physics |')
+    add('|----------------|---------|---------|---------|')
     dxy_bins = [(0, 0.5), (0.5, 1.0), (1.0, 2.0), (2.0, 5.0), (5.0, 100)]
     for lo, hi in dxy_bins:
         label = f'[{lo}, {hi})' if hi < 100 else f'[{lo}, +)'
-        reg_found = sum(1 for p in regular_collector.pions if lo <= p['dxy_sig'] < hi and p['found_at_200'])
-        reg_total = max(1, sum(1 for p in regular_collector.pions if lo <= p['dxy_sig'] < hi))
-        phy_found = sum(1 for p in physics_collector.pions if lo <= p['dxy_sig'] < hi and p['found_at_200'])
-        phy_total = max(1, sum(1 for p in physics_collector.pions if lo <= p['dxy_sig'] < hi))
-        reg_rate = reg_found / reg_total
-        phy_rate = phy_found / phy_total
-        add(f'| {label} | {reg_rate:.3f} (n={reg_total}) | {phy_rate:.3f} (n={phy_total}) | {phy_rate-reg_rate:+.3f} |')
+        rates = {}
+        for cname, collector in [('s1', stage1_collector), ('reg', regular_collector), ('phy', physics_collector)]:
+            found = sum(1 for p in collector.pions if lo <= p['dxy_sig'] < hi and p['found_at_200'])
+            total = max(1, sum(1 for p in collector.pions if lo <= p['dxy_sig'] < hi))
+            rates[cname] = (found, total, found / total)
+        add(f'| {label} | {rates["s1"][2]:.3f} (n={rates["s1"][1]}) | {rates["reg"][2]:.3f} | {rates["phy"][2]:.3f} |')
 
     add()
     add('### Uncanny valley (pT 0.3-0.5 AND |dxy_sig| < 0.5)')
     add()
-    for name, collector in [('Regular', regular_collector), ('Physics', physics_collector)]:
+    for name, collector in [('Stage 1', stage1_collector), ('Regular', regular_collector), ('Physics', physics_collector)]:
         uv = [p for p in collector.pions if 0.3 <= p['pt'] < 0.5 and p['dxy_sig'] < 0.5]
         found = sum(1 for p in uv if p['found_at_200'])
         total = max(1, len(uv))
@@ -415,14 +416,15 @@ def generate_report(
     add()
     add('## 5. Per-Pion-Role Analysis (3-GT events only)')
     add()
-    add('| Role | Regular found rate | Physics found rate | Delta |')
-    add('|------|-------------------|-------------------|-------|')
+    add('| Role | Stage 1 | Regular | Physics |')
+    add('|------|---------|---------|---------|')
     for role in ['highest_pt', 'middle_pt', 'lowest_pt']:
-        reg_pions = [p for p in regular_collector.pions if p['role'] == role]
-        phy_pions = [p for p in physics_collector.pions if p['role'] == role]
-        reg_rate = sum(p['found_at_200'] for p in reg_pions) / max(1, len(reg_pions))
-        phy_rate = sum(p['found_at_200'] for p in phy_pions) / max(1, len(phy_pions))
-        add(f'| {role} | {reg_rate:.3f} (n={len(reg_pions)}) | {phy_rate:.3f} (n={len(phy_pions)}) | {phy_rate-reg_rate:+.3f} |')
+        rates = {}
+        for cname, collector in [('s1', stage1_collector), ('reg', regular_collector), ('phy', physics_collector)]:
+            pions = [p for p in collector.pions if p['role'] == role]
+            rate = sum(p['found_at_200'] for p in pions) / max(1, len(pions))
+            rates[cname] = (rate, len(pions))
+        add(f'| {role} | {rates["s1"][0]:.3f} (n={rates["s1"][1]}) | {rates["reg"][0]:.3f} | {rates["phy"][0]:.3f} |')
 
     add()
     add('Mean pT by role:')
@@ -534,6 +536,52 @@ def generate_report(
 
 
 # ---------------------------------------------------------------------------
+# Parquet export
+# ---------------------------------------------------------------------------
+
+def _export_gt_pion_data(
+    stage1_collector: PerPionCollector,
+    regular_collector: PerPionCollector,
+    physics_collector: PerPionCollector,
+    output_path: str,
+) -> None:
+    """Export per-GT-pion data to parquet for downstream analysis.
+
+    Each row is one GT pion. Columns include pT, dxy_sig, charge, role,
+    and ranks from all three models (Stage 1, regular cascade, physics cascade).
+    """
+    import pandas as pd
+
+    rows = []
+    n_pions = len(stage1_collector.pions)
+    for i in range(n_pions):
+        s1 = stage1_collector.pions[i]
+        reg = regular_collector.pions[i]
+        phy = physics_collector.pions[i]
+        rows.append({
+            'event_id': s1['event_id'],
+            'pt': s1['pt'],
+            'dxy_sig': s1['dxy_sig'],
+            'charge': s1['charge'],
+            'role': s1['role'],
+            'stage1_rank': s1['cascade_rank'],
+            'regular_rank': reg['cascade_rank'],
+            'physics_rank': phy['cascade_rank'],
+            'stage1_found_at_200': s1['found_at_200'],
+            'regular_found_at_200': reg['found_at_200'],
+            'physics_found_at_200': phy['found_at_200'],
+            'regular_in_stage1_top600': reg['in_stage1_top600'],
+        })
+
+    dataframe = pd.DataFrame(rows)
+    os.makedirs(os.path.dirname(output_path) or '.', exist_ok=True)
+    dataframe.to_parquet(output_path, index=False)
+    logger.info(
+        f'Exported {len(dataframe)} GT pion ranks to {output_path}'
+    )
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -547,7 +595,7 @@ def main():
     parser.add_argument('--data-config', type=str, required=True)
     parser.add_argument('--data-dir', type=str, required=True)
     parser.add_argument('--output', type=str, default='reports/cascade_model_analysis.md')
-    parser.add_argument('--batch-size', type=int, default=8)
+    parser.add_argument('--batch-size', type=int, default=96)
     parser.add_argument('--max-steps', type=int, default=None)
     parser.add_argument('--num-workers', type=int, default=0)
     parser.add_argument('--device', type=str, default='mps')
@@ -612,6 +660,7 @@ def main():
     regular_accum = MetricsAccumulator(k_values=k_values)
     physics_accum = MetricsAccumulator(k_values=k_values)
 
+    stage1_collector = PerPionCollector()
     regular_collector = PerPionCollector()
     physics_collector = PerPionCollector()
 
@@ -634,6 +683,10 @@ def main():
             stage1_model.train()
             s1_scores = stage1_model(points, features, lorentz_vectors, mask)
             s1_accum.update(s1_scores, track_labels, mask)
+            stage1_collector.update(
+                s1_scores.cpu(), s1_scores.cpu(), track_labels.cpu(),
+                mask.cpu(), lorentz_vectors.cpu(), features.cpu(),
+            )
 
             # Regular cascade
             regular_cascade.train()
@@ -695,6 +748,12 @@ def main():
         f'{regular_accum.total_gt_tracks} GT tracks'
     )
 
+    # Export per-GT-pion ranks to parquet for downstream analysis
+    export_path = args.output.replace('.md', '_gt_pions.parquet')
+    _export_gt_pion_data(
+        stage1_collector, regular_collector, physics_collector, export_path,
+    )
+
     # Extract training curves from logs
     regular_log = os.path.join(
         os.path.dirname(os.path.dirname(args.regular_checkpoint)),
@@ -710,7 +769,7 @@ def main():
     # Generate report
     report = generate_report(
         s1_metrics, regular_metrics, physics_metrics,
-        regular_collector, physics_collector,
+        stage1_collector, regular_collector, physics_collector,
         regular_curves, physics_curves,
         regular_args, physics_args,
     )

@@ -596,7 +596,8 @@ def main():
     parser.add_argument('--data-dir', type=str, required=True)
     parser.add_argument('--output', type=str, default='reports/cascade_model_analysis.md')
     parser.add_argument('--batch-size', type=int, default=96)
-    parser.add_argument('--max-steps', type=int, default=None)
+    parser.add_argument('--max-steps', type=int, default=900,
+                        help='Max batches (default: 900, enough for ~84K val events at batch=96)')
     parser.add_argument('--num-workers', type=int, default=0)
     parser.add_argument('--device', type=str, default='mps')
     args = parser.parse_args()

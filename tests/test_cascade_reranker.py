@@ -373,6 +373,124 @@ class TestExtendedPairwiseFeatures:
         assert torch.isfinite(scores[valid_mask]).all()
 
 
+# ---- Loss modes ----
+
+class TestLossModes:
+    """Test togglable loss functions: pairwise, lambda_rank, rs_at_k."""
+
+    def test_pairwise_loss_default(self):
+        """Default loss_mode='pairwise' should work as before."""
+        model = _make_reranker(loss_mode='pairwise')
+        points, features, lorentz_vectors, mask, track_labels, stage1_scores = (
+            _make_filtered_inputs()
+        )
+        loss_dict = model.compute_loss(
+            points, features, lorentz_vectors, mask,
+            track_labels, stage1_scores,
+        )
+        assert torch.isfinite(loss_dict['total_loss']).all()
+        assert 'ranking_loss' in loss_dict
+
+    def test_lambda_rank_loss(self):
+        """LambdaRank should produce finite loss with boundary weighting."""
+        model = _make_reranker(loss_mode='lambda_rank')
+        points, features, lorentz_vectors, mask, track_labels, stage1_scores = (
+            _make_filtered_inputs()
+        )
+        loss_dict = model.compute_loss(
+            points, features, lorentz_vectors, mask,
+            track_labels, stage1_scores,
+        )
+        assert torch.isfinite(loss_dict['total_loss']).all()
+        assert 'ranking_loss' in loss_dict
+
+    def test_lambda_rank_gradient_flow(self):
+        """LambdaRank gradients should reach all parameters."""
+        # K boundary must be < num_tracks so some pairs straddle it
+        model = _make_reranker(loss_mode='lambda_rank', rs_at_k_target=30)
+        points, features, lorentz_vectors, mask, track_labels, stage1_scores = (
+            _make_filtered_inputs()
+        )
+        loss_dict = model.compute_loss(
+            points, features, lorentz_vectors, mask,
+            track_labels, stage1_scores,
+        )
+        loss_dict['total_loss'].backward()
+        params_with_grad = sum(
+            1 for _, p in model.named_parameters()
+            if p.grad is not None and p.grad.abs().sum() > 0
+        )
+        assert params_with_grad > 0
+
+    def test_rs_at_k_loss(self):
+        """RS@K loss should produce finite, differentiable loss."""
+        model = _make_reranker(loss_mode='rs_at_k', rs_at_k_target=30)
+        points, features, lorentz_vectors, mask, track_labels, stage1_scores = (
+            _make_filtered_inputs()
+        )
+        loss_dict = model.compute_loss(
+            points, features, lorentz_vectors, mask,
+            track_labels, stage1_scores,
+        )
+        assert torch.isfinite(loss_dict['total_loss']).all()
+        assert 'rs_at_k_loss' in loss_dict
+
+    def test_rs_at_k_gradient_flow(self):
+        """RS@K gradients should reach all parameters."""
+        model = _make_reranker(loss_mode='rs_at_k', rs_at_k_target=30)
+        points, features, lorentz_vectors, mask, track_labels, stage1_scores = (
+            _make_filtered_inputs()
+        )
+        loss_dict = model.compute_loss(
+            points, features, lorentz_vectors, mask,
+            track_labels, stage1_scores,
+        )
+        loss_dict['total_loss'].backward()
+        params_with_grad = sum(
+            1 for _, p in model.named_parameters()
+            if p.grad is not None and p.grad.abs().sum() > 0
+        )
+        assert params_with_grad > 0
+
+    def test_hybrid_lambda_loss(self):
+        """Hybrid loss should produce finite loss and anneal alpha."""
+        model = _make_reranker(loss_mode='hybrid_lambda', rs_at_k_target=30)
+        points, features, lorentz_vectors, mask, track_labels, stage1_scores = (
+            _make_filtered_inputs()
+        )
+
+        # Early training: alpha=0, pure pairwise
+        model.set_training_progress(0.0)
+        loss_dict = model.compute_loss(
+            points, features, lorentz_vectors, mask,
+            track_labels, stage1_scores,
+        )
+        assert torch.isfinite(loss_dict['total_loss']).all()
+        assert 'lambda_alpha' in loss_dict
+        assert loss_dict['lambda_alpha'].item() == 0.0
+
+        # Late training: alpha > 0, lambda_rank active
+        model.set_training_progress(0.8)
+        loss_dict = model.compute_loss(
+            points, features, lorentz_vectors, mask,
+            track_labels, stage1_scores,
+        )
+        assert torch.isfinite(loss_dict['total_loss']).all()
+        assert loss_dict['lambda_alpha'].item() > 0.0
+
+    def test_boundary_sampling(self):
+        """Boundary sampling should still produce finite loss."""
+        model = _make_reranker(boundary_sampling=True)
+        points, features, lorentz_vectors, mask, track_labels, stage1_scores = (
+            _make_filtered_inputs()
+        )
+        loss_dict = model.compute_loss(
+            points, features, lorentz_vectors, mask,
+            track_labels, stage1_scores,
+        )
+        assert torch.isfinite(loss_dict['total_loss']).all()
+
+
 class TestCascadeIntegration:
     """Test CascadeReranker plugged into CascadeModel."""
 

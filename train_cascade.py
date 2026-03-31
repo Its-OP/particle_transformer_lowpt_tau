@@ -358,10 +358,8 @@ def main():
     parser.add_argument('--stage2-loss-mode', type=str, default='pairwise',
                         choices=['pairwise', 'lambda_rank', 'rs_at_k', 'hybrid_lambda'],
                         help='Loss function (default: pairwise)')
-    parser.add_argument('--stage2-boundary-sampling', action='store_true',
-                        help='Sample negatives near rank-K boundary instead of random')
     parser.add_argument('--stage2-rs-at-k-target', type=int, default=200,
-                        help='K target for RS@K and LambdaRank boundary (default: 200)')
+                        help='K target for RS@K and LambdaRank (default: 200)')
 
     args = parser.parse_args()
     device = torch.device(args.device)
@@ -480,7 +478,6 @@ def main():
         stage2_ffn_ratio=args.stage2_ffn_ratio,
         stage2_dropout=args.stage2_dropout,
         stage2_loss_mode=args.stage2_loss_mode,
-        stage2_boundary_sampling=args.stage2_boundary_sampling,
         stage2_rs_at_k_target=args.stage2_rs_at_k_target,
     )
     model = model.to(device)

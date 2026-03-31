@@ -37,7 +37,6 @@ def get_model(data_config, **kwargs):
     stage2_ffn_ratio = kwargs.pop('stage2_ffn_ratio', 4)
     stage2_dropout = kwargs.pop('stage2_dropout', 0.1)
     stage2_loss_mode = kwargs.pop('stage2_loss_mode', 'pairwise')
-    stage2_boundary_sampling = kwargs.pop('stage2_boundary_sampling', False)
     stage2_rs_at_k_target = kwargs.pop('stage2_rs_at_k_target', 200)
 
     # Pop unused args from other heads
@@ -89,7 +88,6 @@ def get_model(data_config, **kwargs):
         ranking_num_samples=50,
         ranking_temperature=1.0,
         loss_mode=stage2_loss_mode,
-        boundary_sampling=stage2_boundary_sampling,
         rs_at_k_target=stage2_rs_at_k_target,
     )
     stage2_params = sum(p.numel() for p in stage2.parameters())

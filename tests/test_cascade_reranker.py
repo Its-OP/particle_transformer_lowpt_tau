@@ -478,17 +478,6 @@ class TestLossModes:
         assert torch.isfinite(loss_dict['total_loss']).all()
         assert loss_dict['lambda_alpha'].item() > 0.0
 
-    def test_boundary_sampling(self):
-        """Boundary sampling should still produce finite loss."""
-        model = _make_reranker(boundary_sampling=True)
-        points, features, lorentz_vectors, mask, track_labels, stage1_scores = (
-            _make_filtered_inputs()
-        )
-        loss_dict = model.compute_loss(
-            points, features, lorentz_vectors, mask,
-            track_labels, stage1_scores,
-        )
-        assert torch.isfinite(loss_dict['total_loss']).all()
 
 
 class TestCascadeIntegration:

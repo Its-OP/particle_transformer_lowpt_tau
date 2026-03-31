@@ -32,7 +32,7 @@ def get_model(data_config, **kwargs):
     stage2_num_heads = kwargs.pop('stage2_num_heads', 4)
     stage2_num_layers = kwargs.pop('stage2_num_layers', 3)
     stage2_pair_embed_dims = kwargs.pop('stage2_pair_embed_dims', [64, 64])
-    stage2_pair_extra_dim = kwargs.pop('stage2_pair_extra_dim', 5)
+    stage2_pair_extra_dim = kwargs.pop('stage2_pair_extra_dim', 6)
     stage2_pair_embed_mode = kwargs.pop('stage2_pair_embed_mode', 'concat')
     stage2_ffn_ratio = kwargs.pop('stage2_ffn_ratio', 4)
     stage2_dropout = kwargs.pop('stage2_dropout', 0.1)

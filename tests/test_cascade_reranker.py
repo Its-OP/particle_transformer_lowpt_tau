@@ -204,8 +204,8 @@ class TestExtendedPairwiseFeatures:
     """Test physics-motivated pairwise features (charge, dz, rho, dxy)."""
 
     def test_extra_pairwise_forward_shape(self):
-        """Model with pair_extra_dim=5 should produce correct output shape."""
-        model = _make_reranker(pair_extra_dim=5)
+        """Model with pair_extra_dim=6 should produce correct output shape."""
+        model = _make_reranker(pair_extra_dim=6)
         points, features, lorentz_vectors, mask, _, stage1_scores = (
             _make_filtered_inputs()
         )
@@ -214,7 +214,7 @@ class TestExtendedPairwiseFeatures:
 
     def test_extra_pairwise_scores_finite(self):
         """Valid track scores should be finite with extra pairwise features."""
-        model = _make_reranker(pair_extra_dim=5)
+        model = _make_reranker(pair_extra_dim=6)
         points, features, lorentz_vectors, mask, _, stage1_scores = (
             _make_filtered_inputs()
         )
@@ -224,7 +224,7 @@ class TestExtendedPairwiseFeatures:
 
     def test_extra_pairwise_gradient_flow(self):
         """Gradients should flow through the pairwise feature MLP."""
-        model = _make_reranker(pair_extra_dim=5)
+        model = _make_reranker(pair_extra_dim=6)
         points, features, lorentz_vectors, mask, track_labels, stage1_scores = (
             _make_filtered_inputs()
         )
@@ -244,7 +244,7 @@ class TestExtendedPairwiseFeatures:
     def test_extra_pairwise_no_nan_backward(self):
         """Backward pass should not produce NaN (critical for dxy_phi_corrected
         division which clamps sin(dphi/2) to avoid 0/0)."""
-        model = _make_reranker(pair_extra_dim=5)
+        model = _make_reranker(pair_extra_dim=6)
         points, features, lorentz_vectors, mask, track_labels, stage1_scores = (
             _make_filtered_inputs()
         )
@@ -279,7 +279,7 @@ class TestExtendedPairwiseFeatures:
         - dz_diff is symmetric and non-negative
         - Masking zeros out features for padded tracks
         """
-        model = _make_reranker(pair_extra_dim=5)
+        model = _make_reranker(pair_extra_dim=6)
 
         # Construct inputs with known charge values
         batch_size, num_tracks = 2, 20
@@ -319,7 +319,7 @@ class TestExtendedPairwiseFeatures:
         extra = model._compute_extra_pairwise_features(
             points, features, lorentz_for_pairs, mask_float,
         )
-        assert extra.shape == (batch_size, 5, num_tracks, num_tracks)
+        assert extra.shape == (batch_size, 6, num_tracks, num_tracks)
 
         # Channel 0: charge_product
         charge_prod = extra[0, 0]  # (20, 20)
@@ -363,7 +363,7 @@ class TestExtendedPairwiseFeatures:
 
     def test_sum_mode_works(self):
         """pair_embed_mode='sum' should also work (for ablation)."""
-        model = _make_reranker(pair_extra_dim=5, pair_embed_mode='sum')
+        model = _make_reranker(pair_extra_dim=6, pair_embed_mode='sum')
         points, features, lorentz_vectors, mask, _, stage1_scores = (
             _make_filtered_inputs()
         )

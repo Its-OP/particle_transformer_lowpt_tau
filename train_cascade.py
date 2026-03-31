@@ -355,6 +355,13 @@ def main():
     parser.add_argument('--stage2-pair-embed-mode', type=str, default='concat',
                         choices=['concat', 'sum'],
                         help='How to combine LV and physics pairwise features (default: concat)')
+    parser.add_argument('--stage2-loss-mode', type=str, default='pairwise',
+                        choices=['pairwise', 'lambda_rank', 'rs_at_k', 'hybrid_lambda'],
+                        help='Loss function (default: pairwise)')
+    parser.add_argument('--stage2-boundary-sampling', action='store_true',
+                        help='Sample negatives near rank-K boundary instead of random')
+    parser.add_argument('--stage2-rs-at-k-target', type=int, default=200,
+                        help='K target for RS@K and LambdaRank boundary (default: 200)')
 
     args = parser.parse_args()
     device = torch.device(args.device)
@@ -472,6 +479,9 @@ def main():
         stage2_pair_embed_mode=args.stage2_pair_embed_mode,
         stage2_ffn_ratio=args.stage2_ffn_ratio,
         stage2_dropout=args.stage2_dropout,
+        stage2_loss_mode=args.stage2_loss_mode,
+        stage2_boundary_sampling=args.stage2_boundary_sampling,
+        stage2_rs_at_k_target=args.stage2_rs_at_k_target,
     )
     model = model.to(device)
 
@@ -594,6 +604,11 @@ def main():
     try:
         for epoch in range(start_epoch, args.epochs + 1):
             logger.info(f'=== Epoch {epoch}/{args.epochs} ===')
+
+            # Update training progress for hybrid_lambda loss annealing
+            training_progress = (epoch - 1) / max(1, args.epochs - 1)
+            if hasattr(model, 'stage2') and hasattr(model.stage2, 'set_training_progress'):
+                model.stage2.set_training_progress(training_progress)
 
             train_losses, global_batch_count = train_one_epoch(
                 model, train_loader, optimizer, scheduler,

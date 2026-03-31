@@ -350,7 +350,7 @@ def main():
                         help='Feed-forward expansion ratio (default: 4)')
     parser.add_argument('--stage2-dropout', type=float, default=0.1,
                         help='Dropout rate (default: 0.1)')
-    parser.add_argument('--stage2-pair-extra-dim', type=int, default=5,
+    parser.add_argument('--stage2-pair-extra-dim', type=int, default=6,
                         help='Physics pairwise features: 5=all, 0=disabled (default: 5)')
     parser.add_argument('--stage2-pair-embed-mode', type=str, default='concat',
                         choices=['concat', 'sum'],

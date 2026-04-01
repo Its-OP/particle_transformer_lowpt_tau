@@ -99,6 +99,16 @@ R@600 from 0.70 to 0.91, unblocking the cascade's potential.
 
 ---
 
+#### Shallow ParT Cascade (2 layers)
+**Params:** ~6M (embed=512, 2L, 8H) | **R@200:** 0.692 | **d':** 1.18 | **Rank:** 65
+
+Two-layer Particle Transformer with 6 physics pairwise features, matching the
+8-layer Physics ParT (R@200=0.693) with 4× fewer parameters. Confirms that
+layers 3-8 contribute no ranking improvement and the model over-smooths at
+depth. Now the default Stage 2 configuration.
+
+---
+
 #### d-prime Metric Fix
 **Type:** Bug fix
 

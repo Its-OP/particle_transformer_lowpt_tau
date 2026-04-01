@@ -338,14 +338,14 @@ def main():
     parser.add_argument('--resume', type=str, default=None)
 
     # Stage 2 architecture (passed through to network wrapper)
-    parser.add_argument('--stage2-embed-dim', type=int, default=128,
-                        help='Transformer embedding dimension (default: 128)')
-    parser.add_argument('--stage2-num-heads', type=int, default=4,
-                        help='Number of attention heads (default: 4)')
-    parser.add_argument('--stage2-num-layers', type=int, default=3,
-                        help='Number of transformer blocks (default: 3)')
-    parser.add_argument('--stage2-pair-embed-dims', type=str, default='64,64',
-                        help='Comma-separated pair embed MLP dims (default: 64,64)')
+    parser.add_argument('--stage2-embed-dim', type=int, default=512,
+                        help='Transformer embedding dimension (default: 512)')
+    parser.add_argument('--stage2-num-heads', type=int, default=8,
+                        help='Number of attention heads (default: 8)')
+    parser.add_argument('--stage2-num-layers', type=int, default=2,
+                        help='Number of transformer blocks (default: 2)')
+    parser.add_argument('--stage2-pair-embed-dims', type=str, default='64,64,64',
+                        help='Comma-separated pair embed MLP dims (default: 64,64,64)')
     parser.add_argument('--stage2-ffn-ratio', type=int, default=4,
                         help='Feed-forward expansion ratio (default: 4)')
     parser.add_argument('--stage2-dropout', type=float, default=0.1,

@@ -1,0 +1,9 @@
+executable = run_convert.sh
+
+output = logs/convert.$(ClusterId).out
+error  = logs/convert.$(ClusterId).err
+log    = logs/convert.$(ClusterId).log
+
++JobFlavour = "workday"
+
+queue

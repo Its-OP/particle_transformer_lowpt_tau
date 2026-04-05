@@ -1,6 +1,6 @@
 """Network wrapper for TrackPreFilter (Stage 1 of two-stage pipeline).
 
-Default configuration: MLP mode with hidden_dim=192,
+Default configuration: MLP mode with hidden_dim=256,
 num_message_rounds=2, ranking_num_samples=50.
 
 Input features (16): px, py, pz, eta, phi, charge, dxy_significance,
@@ -38,7 +38,7 @@ def get_model(data_config, **kwargs):
     configuration = dict(
         mode='mlp',
         input_dim=input_dim,
-        hidden_dim=192,
+        hidden_dim=kwargs.pop('hidden_dim', 256),
         num_neighbors=16,
         num_message_rounds=2,
         ranking_num_samples=50,

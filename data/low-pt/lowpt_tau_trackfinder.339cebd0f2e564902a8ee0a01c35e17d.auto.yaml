@@ -130,8 +130,8 @@ preprocess:
     track_log_covariance_lambda_lambda:
       length: 2100
       pad_mode: constant
-      center: -13.105501174926758
-      scale: 0.6764469658214219
+      center: -13.105502128601074
+      scale: 0.6764465294389352
       min: -5
       max: 5
       pad_value: 0
@@ -207,11 +207,13 @@ new_variables:
   track_energy: np.sqrt(track_px**2 + track_py**2 + track_pz**2 + 0.13957**2)
   track_log_dz_significance: np.sign(track_dz_significance) * np.log1p(np.abs(track_dz_significance))
   track_log_norm_chi2: np.log1p(track_norm_chi2)
-  track_log_pt_error: np.log(track_pt_error + 1e-12)
-  track_log_covariance_phi_phi: np.log(track_covariance_phi_phi + 1e-12)
-  track_log_covariance_lambda_lambda: np.log(track_covariance_lambda_lambda + 1e-12)
+  track_log_pt_error: np.log(np.maximum(track_pt_error, 1e-12))
+  track_log_covariance_phi_phi: np.log(np.maximum(track_covariance_phi_phi, 1e-12))
+  track_log_covariance_lambda_lambda: np.log(np.maximum(track_covariance_lambda_lambda,
+    1e-12))
   track_log_pt: np.log(track_pt + 1e-6)
-  track_log_relative_pt_error: np.log(track_pt_error / (track_pt + 1e-6) + 1e-12)
+  track_log_relative_pt_error: np.log(np.maximum(track_pt_error / (track_pt + 1e-6),
+    1e-12))
   track_eta_raw: track_eta
   track_phi_raw: track_phi
   track_px_raw: track_px

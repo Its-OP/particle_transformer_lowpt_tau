@@ -19,13 +19,15 @@ new_variables:
    ### Using log1p (not log+eps) so padding zeros map to 0 instead of -13.8.
    ### Real tracks: log1p(1) = 0.69, log1p(10) = 2.40. Clean separation from padding at 0.
    track_log_norm_chi2: np.log1p(track_norm_chi2)
-   track_log_pt_error: np.log(track_pt_error + 1e-12)
-   track_log_covariance_phi_phi: np.log(track_covariance_phi_phi + 1e-12)
-   track_log_covariance_lambda_lambda: np.log(track_covariance_lambda_lambda + 1e-12)
+   ### np.maximum clamps non-positive values (zeros from padding, rare negatives
+   ### from numerical noise in covariance fits) to 1e-12 before log.
+   track_log_pt_error: np.log(np.maximum(track_pt_error, 1e-12))
+   track_log_covariance_phi_phi: np.log(np.maximum(track_covariance_phi_phi, 1e-12))
+   track_log_covariance_lambda_lambda: np.log(np.maximum(track_covariance_lambda_lambda, 1e-12))
    ###
    ### Derived features: standard in CMS/ATLAS taggers (DeepJet, DeepTau, GN2)
    track_log_pt: np.log(track_pt + 1e-6)
-   track_log_relative_pt_error: np.log(track_pt_error / (track_pt + 1e-6) + 1e-12)
+   track_log_relative_pt_error: np.log(np.maximum(track_pt_error / (track_pt + 1e-6), 1e-12))
    ###
    ### Raw aliases: avoid parameter collision between standardized and raw copies
    track_eta_raw: track_eta

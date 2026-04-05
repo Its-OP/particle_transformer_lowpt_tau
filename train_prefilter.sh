@@ -61,7 +61,7 @@ SCHEDULER="cosine"
 DEVICE="cuda:0"
 STEPS_PER_EPOCH=500
 NUM_WORKERS=10
-NO_COMPILE=false
+NO_COMPILE=True
 KEEP_BEST_K=5
 
 # ---- Parse extra arguments ----

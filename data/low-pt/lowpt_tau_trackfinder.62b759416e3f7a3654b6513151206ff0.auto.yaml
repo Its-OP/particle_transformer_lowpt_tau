@@ -8,7 +8,7 @@ preprocess:
   data_fraction: 0.5
   params:
     track_eta_raw:
-      length: 3500
+      length: 2100
       pad_mode: constant
       center: null
       scale: 1
@@ -16,7 +16,7 @@ preprocess:
       max: 5
       pad_value: 0
     track_phi_raw:
-      length: 3500
+      length: 2100
       pad_mode: constant
       center: null
       scale: 1
@@ -24,47 +24,47 @@ preprocess:
       max: 5
       pad_value: 0
     track_px:
-      length: 3500
+      length: 2100
       pad_mode: constant
-      center: -0.006060748361051083
-      scale: 2.049244009091388
+      center: -0.006430423818528652
+      scale: 1.4234477650567117
       min: -5
       max: 5
       pad_value: 0
     track_py:
-      length: 3500
+      length: 2100
       pad_mode: constant
-      center: 0.0008623283356428146
-      scale: 2.0672471583552237
+      center: 0.0028774477541446686
+      scale: 1.4379251203920316
       min: -5
       max: 5
       pad_value: 0
     track_pz:
-      length: 3500
+      length: 2100
       pad_mode: constant
-      center: 0.016931146383285522
-      scale: 0.5448640983115504
+      center: 0.010469610802829266
+      scale: 0.363983348553013
       min: -5
       max: 5
       pad_value: 0
     track_eta:
-      length: 3500
+      length: 2100
       pad_mode: constant
-      center: 0.03643798828125
-      scale: 0.5045422350876112
+      center: 0.01318359375
+      scale: 0.5305012304105686
       min: -5
       max: 5
       pad_value: 0
     track_phi:
-      length: 3500
+      length: 2100
       pad_mode: constant
-      center: 0.0036191940307617188
-      scale: 0.461842505722512
+      center: 0.007039070129394531
+      scale: 0.46309528383673904
       min: -5
       max: 5
       pad_value: 0
     track_charge:
-      length: 3500
+      length: 2100
       pad_mode: constant
       center: 1.0
       scale: 0.5
@@ -72,23 +72,23 @@ preprocess:
       max: 5
       pad_value: 0
     track_dxy_significance:
-      length: 3500
+      length: 2100
       pad_mode: constant
-      center: 0.00548116653226316
-      scale: 0.855093529360903
+      center: 0.001440606254618615
+      scale: 0.795012243086254
       min: -5
       max: 5
       pad_value: 0
     track_log_dz_significance:
-      length: 3500
+      length: 2100
       pad_mode: constant
-      center: -0.024249887093901634
-      scale: 0.17576522124713212
+      center: -0.02317805401980877
+      scale: 0.1648372537649761
       min: -5
       max: 5
       pad_value: 0
     track_log_norm_chi2:
-      length: 3500
+      length: 2100
       pad_mode: constant
       center: 0.0
       scale: 1.442695036924675
@@ -96,15 +96,15 @@ preprocess:
       max: 5
       pad_value: 0
     track_log_pt_error:
-      length: 3500
+      length: 2100
       pad_mode: constant
-      center: -4.608110427856445
-      scale: 1.0950276191167418
+      center: -4.272030830383301
+      scale: 1.1910083963697606
       min: -5
       max: 5
       pad_value: 0
     track_n_valid_pixel_hits:
-      length: 3500
+      length: 2100
       pad_mode: constant
       center: 4.0
       scale: 1.0
@@ -112,47 +112,47 @@ preprocess:
       max: 5
       pad_value: 0
     track_dca_significance:
-      length: 3500
+      length: 2100
       pad_mode: constant
-      center: 0.7168014049530029
-      scale: 0.6844383638898607
+      center: 0.7577134966850281
+      scale: 0.5690610667554613
       min: -5
       max: 5
       pad_value: 0
     track_log_covariance_phi_phi:
-      length: 3500
+      length: 2100
       pad_mode: constant
-      center: -10.42292594909668
-      scale: 0.5886792029125859
+      center: -11.352328300476074
+      scale: 0.7226724191402992
       min: -5
       max: 5
       pad_value: 0
     track_log_covariance_lambda_lambda:
-      length: 3500
+      length: 2100
       pad_mode: constant
-      center: -12.234929084777832
-      scale: 0.5727244523872986
+      center: -13.105501174926758
+      scale: 0.6764469658214219
       min: -5
       max: 5
       pad_value: 0
     track_log_pt:
-      length: 3500
+      length: 2100
       pad_mode: constant
-      center: -0.612501859664917
-      scale: 1.4876351177830824
+      center: -0.23505374789237976
+      scale: 1.7074861571949917
       min: -5
       max: 5
       pad_value: 0
     track_log_relative_pt_error:
-      length: 3500
+      length: 2100
       pad_mode: constant
-      center: -3.99338960647583
-      scale: 1.7132244067359068
+      center: -4.127859115600586
+      scale: 1.6997517423826733
       min: -5
       max: 5
       pad_value: 0
     track_px_raw:
-      length: 3500
+      length: 2100
       pad_mode: constant
       center: null
       scale: 1
@@ -160,7 +160,7 @@ preprocess:
       max: 5
       pad_value: 0
     track_py_raw:
-      length: 3500
+      length: 2100
       pad_mode: constant
       center: null
       scale: 1
@@ -168,7 +168,7 @@ preprocess:
       max: 5
       pad_value: 0
     track_pz_raw:
-      length: 3500
+      length: 2100
       pad_mode: constant
       center: null
       scale: 1
@@ -176,7 +176,7 @@ preprocess:
       max: 5
       pad_value: 0
     track_energy:
-      length: 3500
+      length: 2100
       pad_mode: constant
       center: null
       scale: 1
@@ -184,7 +184,7 @@ preprocess:
       max: 5
       pad_value: 0
     track_mask:
-      length: 3500
+      length: 2100
       pad_mode: constant
       center: null
       scale: 1
@@ -192,7 +192,7 @@ preprocess:
       max: 5
       pad_value: 0
     track_label_from_tau:
-      length: 3500
+      length: 2100
       pad_mode: constant
       center: null
       scale: 1
@@ -220,7 +220,7 @@ new_variables:
   dummy_label: np.ones_like(event_n_tracks, dtype='float32')
 inputs:
   pf_points:
-    length: 3500
+    length: 2100
     pad_mode: constant
     vars:
     - - track_eta_raw
@@ -228,7 +228,7 @@ inputs:
     - - track_phi_raw
       - null
   pf_features:
-    length: 3500
+    length: 2100
     pad_mode: constant
     vars:
     - track_px
@@ -248,7 +248,7 @@ inputs:
     - track_log_pt
     - track_log_relative_pt_error
   pf_vectors:
-    length: 3500
+    length: 2100
     pad_mode: constant
     vars:
     - - track_px_raw
@@ -260,13 +260,13 @@ inputs:
     - - track_energy
       - null
   pf_mask:
-    length: 3500
+    length: 2100
     pad_mode: constant
     vars:
     - - track_mask
       - null
   pf_label:
-    length: 3500
+    length: 2100
     pad_mode: constant
     vars:
     - - track_label_from_tau

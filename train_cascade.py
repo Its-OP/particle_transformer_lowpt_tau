@@ -309,7 +309,7 @@ def main():
     parser.add_argument('--network', type=str, required=True)
     parser.add_argument('--stage1-checkpoint', type=str, required=True,
                         help='Path to trained Stage 1 (TrackPreFilter) checkpoint')
-    parser.add_argument('--top-k1', type=int, default=600,
+    parser.add_argument('--top-k1', type=int, default=256,
                         help='Number of tracks to pass from Stage 1 to Stage 2')
     parser.add_argument('--model-name', type=str, default='Cascade')
     parser.add_argument('--experiments-dir', type=str, default='experiments')
@@ -556,7 +556,7 @@ def main():
         checkpoints_directory=checkpoints_dir,
         keep_best_k=args.keep_best_k,
         criterion_mode='max',
-        criterion_name='R@200',
+        criterion_name='R@50',
     )
 
     # ---- TensorBoard ----
@@ -566,7 +566,7 @@ def main():
     # ---- Training loop ----
     start_epoch = 1
     best_val_loss = float('inf')
-    best_val_recall_at_200 = 0.0
+    best_val_recall_at_50 = 0.0
     best_val_epoch = 0
     global_batch_count = 0
     loss_history = {
@@ -586,14 +586,14 @@ def main():
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         start_epoch = checkpoint.get('epoch', 0) + 1
         best_val_loss = checkpoint.get('best_val_loss', float('inf'))
-        best_val_recall_at_200 = checkpoint.get(
-            'best_val_recall_at_200', 0.0,
+        best_val_recall_at_50 = checkpoint.get(
+            'best_val_recall_at_50', 0.0,
         )
         best_val_epoch = checkpoint.get('best_val_epoch', 0)
         global_batch_count = checkpoint.get('global_batch_count', 0)
         logger.info(
             f'Resumed from epoch {start_epoch - 1}, '
-            f'best R@200={best_val_recall_at_200:.5f}',
+            f'best R@50={best_val_recall_at_50:.5f}',
         )
 
     logger.info(f'=== Training Cascade (K1={args.top_k1}) ===')
@@ -631,12 +631,12 @@ def main():
             )
 
             val_loss = val_losses['total_loss']
-            val_recall_at_200 = val_metrics.get('recall_at_200', 0.0)
+            val_recall_at_50 = val_metrics.get('recall_at_50', 0.0)
             stage1_recall = val_metrics.get('stage1_recall_at_k1', 0.0)
 
-            is_best = val_recall_at_200 > best_val_recall_at_200
+            is_best = val_recall_at_50 > best_val_recall_at_50
             if is_best:
-                best_val_recall_at_200 = val_recall_at_200
+                best_val_recall_at_50 = val_recall_at_50
                 best_val_epoch = epoch
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
@@ -671,7 +671,7 @@ def main():
                 logger.info(
                     f'Epoch {epoch} val | '
                     f'total: {val_loss:.5f} '
-                    f'R@200: {val_recall_at_200:.4f} ★ new best | '
+                    f'R@50: {val_recall_at_50:.4f} ★ new best | '
                     f'{val_summary}',
                 )
             else:
@@ -679,7 +679,7 @@ def main():
                 logger.info(
                     f'Epoch {epoch} val | '
                     f'total: {val_loss:.5f} '
-                    f'(best R@200: {best_val_recall_at_200:.4f}, '
+                    f'(best R@50: {best_val_recall_at_50:.4f}, '
                     f'{epochs_since_best} epochs ago) | '
                     f'{val_summary}',
                 )
@@ -736,7 +736,7 @@ def main():
                     'model_state_dict': original_model.state_dict(),
                     'optimizer_state_dict': optimizer.state_dict(),
                     'best_val_loss': best_val_loss,
-                    'best_val_recall_at_200': best_val_recall_at_200,
+                    'best_val_recall_at_50': best_val_recall_at_50,
                     'best_val_epoch': best_val_epoch,
                     'global_batch_count': global_batch_count,
                     'val_losses': val_losses,
@@ -744,7 +744,7 @@ def main():
                     'args': vars(args),
                 }
                 checkpoint_manager.save_checkpoint(
-                    checkpoint, epoch, val_recall_at_200, is_best,
+                    checkpoint, epoch, val_recall_at_50, is_best,
                 )
 
     except Exception:
@@ -754,7 +754,7 @@ def main():
     # ---- Final outputs ----
     tensorboard_writer.close()
     plot_loss_curves(loss_history, experiment_dir)
-    logger.info(f'Training complete. Best R@200: {best_val_recall_at_200:.5f}')
+    logger.info(f'Training complete. Best R@50: {best_val_recall_at_50:.5f}')
     logger.info(f'Experiment: {experiment_dir}')
 
 

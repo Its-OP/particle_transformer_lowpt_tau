@@ -63,10 +63,37 @@ def get_model(data_config, **kwargs):
     _logger.info(f'Loading Stage 1 from: {stage1_checkpoint}')
     checkpoint = torch.load(stage1_checkpoint, map_location='cpu', weights_only=False)
 
-    # Infer Stage 1 config from checkpoint
+    # Infer Stage 1 hidden_dim and input_dim from state dict shapes so the
+    # wrapper adapts to checkpoints trained with different widths (e.g., the
+    # 2026-04 cutoff run uses hidden_dim=256 while earlier runs used 192).
+    # track_mlp.0.weight has shape (hidden_dim, input_dim, 1) in the MLP backbone.
     stage1_state = checkpoint.get('model_state_dict', checkpoint)
-    stage1 = TrackPreFilter(mode='mlp', input_dim=input_dim, hidden_dim=192,
-                            num_message_rounds=2, num_neighbors=16)
+    first_layer_key = 'track_mlp.0.weight'
+    if first_layer_key not in stage1_state:
+        raise ValueError(
+            f'Cannot infer Stage 1 dimensions: expected key '
+            f'"{first_layer_key}" not found in {stage1_checkpoint}'
+        )
+    inferred_hidden_dim = stage1_state[first_layer_key].shape[0]
+    inferred_input_dim = stage1_state[first_layer_key].shape[1]
+    if inferred_input_dim != input_dim:
+        raise ValueError(
+            f'Stage 1 checkpoint input_dim={inferred_input_dim} does not '
+            f'match data config input_dim={input_dim}. '
+            f'Retrain Stage 1 on the current feature set.'
+        )
+    _logger.info(
+        f'Stage 1 config from checkpoint: '
+        f'hidden_dim={inferred_hidden_dim}, input_dim={inferred_input_dim}'
+    )
+
+    stage1 = TrackPreFilter(
+        mode='mlp',
+        input_dim=inferred_input_dim,
+        hidden_dim=inferred_hidden_dim,
+        num_message_rounds=2,
+        num_neighbors=16,
+    )
     stage1.load_state_dict(stage1_state)
     _logger.info('Stage 1 loaded successfully')
 

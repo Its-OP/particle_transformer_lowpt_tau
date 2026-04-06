@@ -109,8 +109,12 @@ def train_one_epoch(
         optimizer.zero_grad(set_to_none=True)
 
         with torch.amp.autocast('cuda', enabled=grad_scaler is not None):
+            # Contrastive denoising DISABLED for the 2026-04-06 overfit
+            # ablation. Flip back to use_contrastive_denoising=True to
+            # re-enable the denoising auxiliary loss term.
             loss_dict = model.compute_loss(
                 points, features, lorentz_vectors, mask, track_labels,
+                use_contrastive_denoising=False,
             )
             # Remove cached scores (non-scalar) before loss accumulation
             loss_dict.pop('_scores', None)
@@ -236,9 +240,12 @@ def validate(
             # Get loss and scores in a single forward pass.
             # compute_loss() calls forward() internally and caches scores
             # in loss_dict['_scores'] — avoids running the model twice.
+            # Denoising disabled for the 2026-04-06 overfit ablation so
+            # the reported val loss stays comparable to train loss.
             model.train()
             loss_dict = model.compute_loss(
                 points, features, lorentz_vectors, mask, track_labels,
+                use_contrastive_denoising=False,
             )
             model.eval()
 

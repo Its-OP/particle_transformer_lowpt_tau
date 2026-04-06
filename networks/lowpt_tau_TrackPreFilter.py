@@ -42,17 +42,35 @@ def get_model(data_config, **kwargs):
         num_neighbors=16,
         num_message_rounds=2,
         ranking_num_samples=50,
-        # Temperature scheduling (Kukleva et al., ICLR 2023):
-        # Ranking temperature: high → low (smooth gradients first, then sharp)
-        ranking_temperature_start=2.0,
-        ranking_temperature_end=0.5,
-        # Denoising sigma: large → small (easy positives first, then hard)
+        # -------------------------------------------------------------
+        # Exotic loss enhancements DISABLED (2026-04-06 overfit ablation)
+        # -------------------------------------------------------------
+        # Clean baseline: plain softplus pairwise ranking with no schedules.
+        # We keep only the ranking loss; every other curriculum / re-weighting
+        # trick is off. If the epoch-30 overfit persists under this config,
+        # the cause is structural (dataset, capacity, LR, regularization)
+        # rather than anything exotic. See reports/prefilter_analysis_20260406.md.
+        #
+        # Original values (re-enable to restore the Kukleva/DRW recipe):
+        #   ranking_temperature_start=2.0, ranking_temperature_end=0.5
+        #   denoising_sigma_start=1.0,     denoising_sigma_end=0.1
+        #   drw_warmup_fraction=0.3,       drw_positive_weight=2.0
+        #
+        # Temperature annealing OFF: T held at 1.0 throughout training, so
+        # the loss reduces to plain `softplus(s_neg - s_pos)`. Removes the
+        # boundary-sharpening pressure that correlates with late-epoch overfit.
+        ranking_temperature_start=1.0,
+        ranking_temperature_end=1.0,
+        # Denoising sigmas are dead values — the contrastive denoising loss
+        # is gated off in train_prefilter.py via use_contrastive_denoising=False.
         denoising_sigma_start=1.0,
         denoising_sigma_end=0.1,
-        # Deferred Re-Weighting (Cao et al., NeurIPS 2019):
-        # Uniform weights for 30% of training, then 2× upweight positives
-        drw_warmup_fraction=0.3,
-        drw_positive_weight=2.0,
+        # DRW OFF: warmup=1.0 means the DRW activation epoch is 1.0 * epochs,
+        # i.e. never for a 100-epoch run. drw_positive_weight=1.0 is a second
+        # safeguard: even if DRW somehow activates, the scalar multiplier
+        # is a no-op.
+        drw_warmup_fraction=1.0,
+        drw_positive_weight=1.0,
     )
     configuration.update(**kwargs)
     _logger.info('TrackPreFilter config: %s' % str(configuration))

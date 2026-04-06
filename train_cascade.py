@@ -51,6 +51,7 @@ from pretrain_backbone import (
     plot_loss_curves,
     save_loss_history,
 )
+from utils.optimizers import OPTIMIZER_NAMES, build_optimizer
 from utils.training_utils import (
     CheckpointManager,
     MetricsAccumulator,
@@ -336,6 +337,10 @@ def main():
     parser.add_argument('--save-every', type=int, default=5)
     parser.add_argument('--keep-best-k', type=int, default=5)
     parser.add_argument('--resume', type=str, default=None)
+    parser.add_argument(
+        '--optimizer', type=str, default='adamw', choices=OPTIMIZER_NAMES,
+        help='Optimizer to use. SOAP and Muon require --amp disabled.',
+    )
 
     # Stage 2 architecture (passed through to network wrapper)
     parser.add_argument('--stage2-embed-dim', type=int, default=512,
@@ -387,6 +392,19 @@ def main():
 
     logger.info(f'Experiment directory: {experiment_dir}')
     logger.info(f'Arguments: {vars(args)}')
+
+    # ---- Force-disable AMP for optimizers that don't support it ----
+    # SOAP has no lower-precision support yet; Muon is incompatible with
+    # torch.cuda.amp.GradScaler. Rather than erroring, we silently disable
+    # --amp for these optimizers so the user can launch with the same
+    # train_*.sh invocation that passes --amp unconditionally.
+    if args.amp and args.optimizer in ('soap', 'muon'):
+        logger.warning(
+            f'--amp is incompatible with --optimizer {args.optimizer}; '
+            f'force-disabling AMP for this run. SOAP/Muon do not support '
+            f'mixed precision yet.'
+        )
+        args.amp = False
 
     # ---- Data loading ----
     import glob
@@ -510,12 +528,14 @@ def main():
     else:
         logger.info('torch.compile disabled.')
 
-    # ---- Optimizer (Stage 2 parameters only) ----
-    trainable_parameters = [p for p in model.parameters() if p.requires_grad]
-    optimizer = torch.optim.AdamW(
-        trainable_parameters,
+    # ---- Optimizer (Stage 2 parameters only; build_optimizer filters frozen) ----
+    logger.info(f'Building optimizer: {args.optimizer}')
+    optimizer = build_optimizer(
+        name=args.optimizer,
+        model=model,
         lr=args.lr,
         weight_decay=args.weight_decay,
+        amp_enabled=args.amp,
     )
 
     total_steps = args.epochs * steps_per_epoch
@@ -583,7 +603,18 @@ def main():
             args.resume, map_location=device, weights_only=False,
         )
         original_model.load_state_dict(checkpoint['model_state_dict'])
-        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        # Skip loading optimizer state if the saved run used a different
+        # optimizer — state dicts are not portable across optimizer types.
+        saved_optimizer = checkpoint.get('args', {}).get('optimizer', 'adamw')
+        if saved_optimizer == args.optimizer:
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        else:
+            logger.warning(
+                f'Checkpoint was saved with optimizer={saved_optimizer!r} but '
+                f'current run uses {args.optimizer!r}. Skipping '
+                f'optimizer.load_state_dict — training resumes with fresh '
+                f'optimizer state (model weights still loaded).'
+            )
         start_epoch = checkpoint.get('epoch', 0) + 1
         best_val_loss = checkpoint.get('best_val_loss', float('inf'))
         best_val_recall_at_50 = checkpoint.get(

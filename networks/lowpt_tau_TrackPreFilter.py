@@ -42,18 +42,23 @@ def get_model(data_config, **kwargs):
         num_neighbors=16,
         num_message_rounds=2,
         ranking_num_samples=50,
+        # Dropout rate for the mlp-mode MLP hidden layers (track_mlp,
+        # neighbor_mlps, scorer). 0.1 is the 2026-04-07 overfit-mitigation
+        # default. Pass --dropout on the CLI to override (0.0 disables).
+        dropout=kwargs.pop('dropout', 0.1),
         # -------------------------------------------------------------
-        # Exotic loss enhancements DISABLED (2026-04-06 overfit ablation)
+        # Loss-schedule configuration (post-2026-04-06 ablation state)
         # -------------------------------------------------------------
         # Clean baseline: plain softplus pairwise ranking with no schedules.
-        # We keep only the ranking loss; every other curriculum / re-weighting
-        # trick is off. If the epoch-30 overfit persists under this config,
-        # the cause is structural (dataset, capacity, LR, regularization)
-        # rather than anything exotic. See reports/prefilter_analysis_20260406.md.
+        # Contrastive denoising is re-enabled as of 2026-04-07 (it's a
+        # GT-invariance regularizer; disabling it was a side effect of the
+        # DRW ablation). DRW and ranking-temperature annealing stay OFF —
+        # the prefilter analysis report (reports/prefilter_analysis_20260406.md)
+        # identified DRW's epoch-31 activation as the loss discontinuity
+        # and the correlated val-R@200 inflection; we do not want them back.
         #
         # Original values (re-enable to restore the Kukleva/DRW recipe):
         #   ranking_temperature_start=2.0, ranking_temperature_end=0.5
-        #   denoising_sigma_start=1.0,     denoising_sigma_end=0.1
         #   drw_warmup_fraction=0.3,       drw_positive_weight=2.0
         #
         # Temperature annealing OFF: T held at 1.0 throughout training, so
@@ -61,8 +66,11 @@ def get_model(data_config, **kwargs):
         # boundary-sharpening pressure that correlates with late-epoch overfit.
         ranking_temperature_start=1.0,
         ranking_temperature_end=1.0,
-        # Denoising sigmas are dead values — the contrastive denoising loss
-        # is gated off in train_prefilter.py via use_contrastive_denoising=False.
+        # Denoising sigma schedule — LIVE values. The contrastive denoising
+        # loss is enabled in train_prefilter.py's train path (and disabled
+        # in its validate path so val loss remains clean). Large → small
+        # gives a curriculum: easy positives first, then hard ones near the
+        # real GT manifold.
         denoising_sigma_start=1.0,
         denoising_sigma_end=0.1,
         # DRW OFF: warmup=1.0 means the DRW activation epoch is 1.0 * epochs,

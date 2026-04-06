@@ -948,3 +948,166 @@ class TestDINOContrastiveDenoising:
         )
         total_params = sum(1 for _ in model.parameters())
         assert params_with_grad >= total_params - 1
+
+
+# ---- Dropout regularization (2026-04-07 overfit mitigation) ----
+
+class TestDropoutRegularization:
+    """The mlp-mode backbone had zero dropout, which was the biggest missing
+    regularization lever in the overfit audit (reports/prefilter_analysis_20260406.md).
+    These tests encode the post-fix contract: dropout is an explicit constructor
+    kwarg, defaults to 0 for backward compatibility with existing tests, and
+    when set > 0 inserts exactly 5 nn.Dropout modules in the mlp-mode stack
+    (track_mlp × 2, neighbor_mlps × num_message_rounds, scorer × 1).
+    """
+
+    def test_dropout_default_is_zero(self):
+        """No dropout kwarg → self.dropout == 0.0 and no active Dropout modules.
+
+        Backward compatibility: every pre-2026-04-07 test instantiates
+        TrackPreFilter without passing ``dropout``. Those tests must keep
+        working, which requires the default to be 0 and for no Dropout
+        modules with p>0 to be inserted.
+        """
+        import torch.nn as nn
+        model = TrackPreFilter(mode='mlp', input_dim=INPUT_DIM)
+        assert model.dropout == 0.0
+        active_dropouts = [
+            module for module in model.modules()
+            if isinstance(module, nn.Dropout) and module.p > 0
+        ]
+        assert active_dropouts == [], (
+            f'Expected no active Dropout modules at default, got '
+            f'{len(active_dropouts)}'
+        )
+
+    def test_dropout_site_count_mlp_mode(self):
+        """With dropout>0, mlp-mode model must contain exactly 5 nn.Dropout
+        modules, all with p matching the constructor arg.
+
+        Expected sites:
+          - track_mlp: 2 (after each of the two ReLUs)
+          - neighbor_mlps: 2 (num_message_rounds=2, one ReLU per round)
+          - scorer: 1 (after the middle ReLU; NOT before the final output)
+        """
+        import torch.nn as nn
+        model = TrackPreFilter(
+            mode='mlp',
+            input_dim=INPUT_DIM,
+            num_message_rounds=2,
+            dropout=0.3,
+        )
+        dropout_modules = [
+            module for module in model.modules()
+            if isinstance(module, nn.Dropout)
+        ]
+        assert len(dropout_modules) == 5, (
+            f'Expected 5 nn.Dropout modules (track_mlp×2 + neighbor_mlps×2 '
+            f'+ scorer×1), got {len(dropout_modules)}'
+        )
+        for module in dropout_modules:
+            assert module.p == pytest.approx(0.3), (
+                f'Dropout module has p={module.p}, expected 0.3'
+            )
+
+    def test_dropout_scales_with_message_rounds(self):
+        """neighbor_mlps has one dropout per message round. Four rounds → 7 total
+        (track_mlp×2 + neighbor_mlps×4 + scorer×1)."""
+        import torch.nn as nn
+        model = TrackPreFilter(
+            mode='mlp',
+            input_dim=INPUT_DIM,
+            num_message_rounds=4,
+            dropout=0.1,
+        )
+        dropout_modules = [
+            module for module in model.modules()
+            if isinstance(module, nn.Dropout)
+        ]
+        assert len(dropout_modules) == 7
+
+    def test_dropout_identity_in_eval_mode(self):
+        """model.eval() makes Dropout an identity; two forwards on the same
+        input must produce byte-identical outputs."""
+        model = TrackPreFilter(
+            mode='mlp', input_dim=INPUT_DIM,
+            num_message_rounds=2, dropout=0.5,
+        )
+        model.eval()
+        points, features, lorentz_vectors, mask, _ = _make_training_inputs()
+        with torch.no_grad():
+            scores_first = model(points, features, lorentz_vectors, mask)
+            scores_second = model(points, features, lorentz_vectors, mask)
+        assert torch.equal(scores_first, scores_second), (
+            'Dropout should be an identity in eval() mode, but two forward '
+            'passes on the same input produced different outputs.'
+        )
+
+    def test_dropout_stochastic_in_train_mode(self):
+        """model.train() activates Dropout; two forwards on the same input
+        must differ (at least one valid-track score differs by >1e-6)."""
+        torch.manual_seed(1337)
+        model = TrackPreFilter(
+            mode='mlp', input_dim=INPUT_DIM,
+            num_message_rounds=2, dropout=0.5,
+        )
+        model.train()
+        points, features, lorentz_vectors, mask, _ = _make_training_inputs()
+        # Eval-mode the BatchNorm layers so their running stats don't shift
+        # between forward passes — that would confound with dropout. Do this
+        # by setting only the Dropout modules to train and everything else
+        # to eval. Actually simpler: one forward in train mode, then re-seed
+        # and forward again; difference must come from dropout alone (BN
+        # running stats are updated but don't affect the same-input output
+        # since BN uses batch stats in train mode).
+        scores_first = model(points, features, lorentz_vectors, mask)
+        scores_second = model(points, features, lorentz_vectors, mask)
+        valid_mask = mask.squeeze(1).bool()
+        # Compare only valid tracks — padded scores are -inf and equal.
+        diff = (
+            scores_first[valid_mask] - scores_second[valid_mask]
+        ).abs().max()
+        assert diff.item() > 1e-6, (
+            f'Dropout should make two train-mode forwards differ on valid '
+            f'tracks, but max diff was {diff.item()}'
+        )
+
+    def test_denoising_loss_in_train_dict_by_default(self):
+        """With denoising re-enabled as the default path and self.training=True,
+        compute_loss must return a dict containing 'denoising_loss'. This is
+        the contract that train_prefilter.py relies on for loss logging.
+        """
+        model = TrackPreFilter(
+            mode='mlp', input_dim=INPUT_DIM,
+            num_message_rounds=2, dropout=0.0,
+        )
+        model.train()
+        points, features, lorentz_vectors, mask, track_labels = (
+            _make_training_inputs()
+        )
+        # Default kwarg path — use_contrastive_denoising not passed → True
+        loss_dict = model.compute_loss(
+            points, features, lorentz_vectors, mask, track_labels,
+        )
+        assert 'denoising_loss' in loss_dict, (
+            f'Expected denoising_loss in compute_loss output, got keys: '
+            f'{sorted(loss_dict.keys())}'
+        )
+        assert torch.isfinite(loss_dict['denoising_loss']).all()
+
+    def test_denoising_loss_absent_when_kwarg_false(self):
+        """Explicit opt-out via use_contrastive_denoising=False — used by
+        train_prefilter.py's validate() to keep val loss clean."""
+        model = TrackPreFilter(
+            mode='mlp', input_dim=INPUT_DIM,
+            num_message_rounds=2, dropout=0.0,
+        )
+        model.train()
+        points, features, lorentz_vectors, mask, track_labels = (
+            _make_training_inputs()
+        )
+        loss_dict = model.compute_loss(
+            points, features, lorentz_vectors, mask, track_labels,
+            use_contrastive_denoising=False,
+        )
+        assert 'denoising_loss' not in loss_dict

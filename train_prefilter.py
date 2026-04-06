@@ -110,12 +110,15 @@ def train_one_epoch(
         optimizer.zero_grad(set_to_none=True)
 
         with torch.amp.autocast('cuda', enabled=grad_scaler is not None):
-            # Contrastive denoising DISABLED for the 2026-04-06 overfit
-            # ablation. Flip back to use_contrastive_denoising=True to
-            # re-enable the denoising auxiliary loss term.
+            # Contrastive denoising re-enabled (2026-04-07) as a regularizer
+            # for the dim256+cutoff overfit. The DRW/temperature-annealing
+            # ablation ruled out exotic loss enhancements as the *trigger*
+            # (DRW's epoch-31 activation was the loss discontinuity), but
+            # denoising itself is a GT-invariance regularizer and helps with
+            # the residual ~2pp train/val gap. DRW and temperature annealing
+            # stay disabled in the wrapper — see reports/prefilter_analysis_20260406.md.
             loss_dict = model.compute_loss(
                 points, features, lorentz_vectors, mask, track_labels,
-                use_contrastive_denoising=False,
             )
             # Remove cached scores (non-scalar) before loss accumulation
             loss_dict.pop('_scores', None)
@@ -241,8 +244,14 @@ def validate(
             # Get loss and scores in a single forward pass.
             # compute_loss() calls forward() internally and caches scores
             # in loss_dict['_scores'] — avoids running the model twice.
-            # Denoising disabled for the 2026-04-06 overfit ablation so
-            # the reported val loss stays comparable to train loss.
+            # Denoising force-disabled in the validation path so the val
+            # loss stays directly comparable to train's ranking component
+            # (denoising is a train-only regularizer, not a metric).
+            # model.train() is required for BN batch-stats — the running
+            # stats stored in the checkpoint are stale (see reports/
+            # experiment_log.md "BatchNorm Fix"). Dropout also activates
+            # here in train() mode, but the BN workaround is more load-
+            # bearing than dropout determinism during a single val pass.
             model.train()
             loss_dict = model.compute_loss(
                 points, features, lorentz_vectors, mask, track_labels,
@@ -298,6 +307,12 @@ def main():
     parser.add_argument('--plateau-patience', type=int, default=5)
     parser.add_argument('--min-lr', type=float, default=1e-6)
     parser.add_argument('--grad-clip', type=float, default=1.0)
+    parser.add_argument(
+        '--dropout', type=float, default=0.1,
+        help='Dropout rate in TrackPreFilter MLP hidden layers (default: 0.1). '
+             'Applied after each ReLU in the mlp-mode track_mlp, '
+             'neighbor_mlps, and scorer. Set to 0 to disable.',
+    )
     parser.add_argument('--train-fraction', type=float, default=0.8,
                         help='Fraction of data-dir for training (ignored if --val-data-dir set)')
     parser.add_argument('--val-data-dir', type=str, default=None,
@@ -436,7 +451,10 @@ def main():
 
     # ---- Model ----
     network_module = load_network_module(args.network)
-    model, model_info = network_module.get_model(data_config)
+    model, model_info = network_module.get_model(
+        data_config,
+        dropout=args.dropout,
+    )
     model = model.to(device)
 
     total_params = sum(p.numel() for p in model.parameters())

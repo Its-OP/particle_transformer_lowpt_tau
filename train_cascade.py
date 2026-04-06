@@ -235,9 +235,14 @@ def validate(
             )
             points, features, lorentz_vectors, mask = model_inputs
 
+            # model.train() here is only for BatchNorm batch stats (stale
+            # running stats would otherwise crater R@K). Denoising is
+            # force-disabled via the compute_loss kwarg so val/train losses
+            # stay directly comparable.
             model.train()
             loss_dict = model.compute_loss(
                 points, features, lorentz_vectors, mask, track_labels,
+                use_contrastive_denoising=False,
             )
             model.eval()
 
@@ -365,6 +370,17 @@ def main():
                         help='Loss function (default: pairwise)')
     parser.add_argument('--stage2-rs-at-k-target', type=int, default=200,
                         help='K target for RS@K and LambdaRank (default: 200)')
+    # Contrastive denoising — auxiliary regularizer on GT track features
+    parser.add_argument('--stage2-denoising', action='store_true',
+                        help='Enable contrastive denoising auxiliary loss '
+                             '(Zhang et al. ICLR 2023, DINO-style).')
+    parser.add_argument('--stage2-denoising-sigma-start', type=float, default=0.3,
+                        help='Noise sigma at training start (default: 0.3)')
+    parser.add_argument('--stage2-denoising-sigma-end', type=float, default=0.05,
+                        help='Noise sigma at training end (default: 0.05)')
+    parser.add_argument('--stage2-denoising-weight', type=float, default=0.5,
+                        help='Weight of the denoising term in total loss '
+                             '(default: 0.5)')
 
     args = parser.parse_args()
     device = torch.device(args.device)
@@ -497,6 +513,10 @@ def main():
         stage2_dropout=args.stage2_dropout,
         stage2_loss_mode=args.stage2_loss_mode,
         stage2_rs_at_k_target=args.stage2_rs_at_k_target,
+        stage2_use_contrastive_denoising=args.stage2_denoising,
+        stage2_denoising_sigma_start=args.stage2_denoising_sigma_start,
+        stage2_denoising_sigma_end=args.stage2_denoising_sigma_end,
+        stage2_denoising_loss_weight=args.stage2_denoising_weight,
     )
     model = model.to(device)
 

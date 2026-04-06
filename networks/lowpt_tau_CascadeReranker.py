@@ -38,6 +38,19 @@ def get_model(data_config, **kwargs):
     stage2_dropout = kwargs.pop('stage2_dropout', 0.1)
     stage2_loss_mode = kwargs.pop('stage2_loss_mode', 'pairwise')
     stage2_rs_at_k_target = kwargs.pop('stage2_rs_at_k_target', 200)
+    # Contrastive denoising — auxiliary regularizer ported from TrackPreFilter
+    stage2_use_contrastive_denoising = kwargs.pop(
+        'stage2_use_contrastive_denoising', False,
+    )
+    stage2_denoising_sigma_start = kwargs.pop(
+        'stage2_denoising_sigma_start', 0.3,
+    )
+    stage2_denoising_sigma_end = kwargs.pop(
+        'stage2_denoising_sigma_end', 0.05,
+    )
+    stage2_denoising_loss_weight = kwargs.pop(
+        'stage2_denoising_loss_weight', 0.5,
+    )
 
     # Pop unused args from other heads
     for unused_arg in [
@@ -116,6 +129,10 @@ def get_model(data_config, **kwargs):
         ranking_temperature=1.0,
         loss_mode=stage2_loss_mode,
         rs_at_k_target=stage2_rs_at_k_target,
+        use_contrastive_denoising=stage2_use_contrastive_denoising,
+        denoising_sigma_start=stage2_denoising_sigma_start,
+        denoising_sigma_end=stage2_denoising_sigma_end,
+        denoising_loss_weight=stage2_denoising_loss_weight,
     )
     stage2_params = sum(p.numel() for p in stage2.parameters())
     _logger.info(f'Stage 2 (CascadeReranker): {stage2_params:,} params (trainable)')

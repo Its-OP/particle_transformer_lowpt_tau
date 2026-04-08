@@ -30,6 +30,7 @@ import os
 import sys
 import time
 import traceback
+from contextlib import contextmanager
 from datetime import datetime
 from typing import TYPE_CHECKING
 
@@ -79,8 +80,14 @@ def train_one_epoch(
     mask_input_index: int,
     label_input_index: int,
     grad_clip_max_norm: float = 1.0,
+    ema_stage2=None,
 ) -> tuple[dict[str, float], int]:
-    """Train Stage 2 for one epoch (Stage 1 is frozen inside CascadeModel)."""
+    """Train Stage 2 for one epoch (Stage 1 is frozen inside CascadeModel).
+
+    When ``ema_stage2`` is not None, the EMA shadow copy of Stage 2 is
+    updated after every optimizer step:
+        θ_ema ← decay · θ_ema + (1 − decay) · θ_live
+    """
     model.train()
     loss_accumulators: dict[str, float] | None = None
     num_batches = 0
@@ -142,6 +149,14 @@ def train_one_epoch(
             grad_scaler.update()
         else:
             optimizer.step()
+
+        # EMA update: drift the shadow copy toward the just-updated live
+        # weights. Must run AFTER optimizer.step() and BEFORE
+        # scheduler.step_batch(). On the non-finite-loss skip path above
+        # (the `continue` ~26 lines up), this is also skipped — correct
+        # semantics: the EMA only reflects real optimizer progress.
+        if ema_stage2 is not None:
+            ema_stage2.update_parameters(model.stage2)
 
         scheduler.step_batch()
 
@@ -306,7 +321,148 @@ def validate(
     return loss_averages, metrics
 
 
-def main():
+# ---------------------------------------------------------------------------
+# EMA helpers (Stage 2 only — Stage 1 is frozen and never benefits from EMA)
+# ---------------------------------------------------------------------------
+
+
+def build_ema_stage2(
+    cascade_model: torch.nn.Module,
+    decay: float,
+    device: torch.device,
+):
+    """Construct an ``AveragedModel`` wrapping ``cascade_model.stage2``.
+
+    The EMA update rule is:
+        θ_ema ← decay · θ_ema + (1 − decay) · θ_live
+    applied to every parameter after each ``optimizer.step()``.
+
+    Returns ``None`` when ``decay <= 0.0`` so the disabled training path
+    is byte-for-byte identical to the pre-EMA code: no deepcopy, no extra
+    tensors, no extra GPU memory.
+
+    ``use_buffers=False`` ensures BatchNorm running statistics in the EMA
+    copy are NOT averaged by ``update_parameters`` — those buffers are
+    themselves an EMA (BN's own momentum), and double-smoothing them
+    would systematically lag the validation distribution. The validation
+    swap context manager copies live BN buffers into the EMA copy
+    directly before each validate pass.
+    """
+    if decay <= 0.0:
+        return None
+    from torch.optim.swa_utils import AveragedModel, get_ema_multi_avg_fn
+    return AveragedModel(
+        cascade_model.stage2,
+        device=device,
+        multi_avg_fn=get_ema_multi_avg_fn(decay=decay),
+        use_buffers=False,
+    )
+
+
+@contextmanager
+def use_ema_stage2_for_validation(
+    cascade_model: torch.nn.Module,
+    ema_stage2,
+):
+    """Temporarily replace ``cascade_model.stage2`` with the EMA copy.
+
+    Copies live Stage 2 BatchNorm running statistics into the EMA copy
+    so the validated module uses BN statistics consistent with the live
+    training distribution (BN buffers are themselves an EMA — they are
+    NOT re-averaged by ``AveragedModel(use_buffers=False)``).
+
+    The swap operates on ``cascade_model`` directly. Callers MUST pass
+    the pre-compile module (``original_model`` in ``main()``) — never
+    the ``torch.compile`` wrapper — and route validation through that
+    same pre-compile module so the compile cache never sees a swapped
+    submodule.
+
+    When ``ema_stage2 is None`` this context manager is a complete
+    no-op: no copies, no swaps, no state changes — the disabled path
+    stays bit-for-bit identical to the current code.
+
+    Args:
+        cascade_model: The pre-compile ``CascadeModel`` whose ``stage2``
+            attribute will be swapped.
+        ema_stage2: An ``AveragedModel`` whose ``.module`` is a deepcopy
+            of ``cascade_model.stage2``, or ``None`` to disable.
+    """
+    if ema_stage2 is None:
+        yield
+        return
+
+    live_stage2 = cascade_model.stage2
+
+    # Sync BN running stats live → EMA. Iterate ``named_buffers`` (NOT
+    # ``state_dict``) so we never overwrite the EMA-averaged parameters,
+    # only the buffers.
+    with torch.no_grad():
+        live_buffers = dict(live_stage2.named_buffers())
+        for buffer_name, ema_buffer in ema_stage2.module.named_buffers():
+            if buffer_name in live_buffers:
+                ema_buffer.copy_(live_buffers[buffer_name])
+
+    cascade_model.stage2 = ema_stage2.module
+    try:
+        yield
+    finally:
+        cascade_model.stage2 = live_stage2
+
+
+def resume_ema_state(
+    ema_stage2,
+    checkpoint: dict,
+    cascade_model: torch.nn.Module,
+    decay: float,
+    device: torch.device,
+):
+    """Handle EMA state on resume from a checkpoint.
+
+    Four cases:
+        (a) ``ema_stage2 is not None`` and ``checkpoint['ema_state_dict']``
+            is a non-None dict → load it into ``ema_stage2`` and return
+            the same object.
+        (b) ``ema_stage2 is not None`` but checkpoint missing/None →
+            warn, rebuild a fresh EMA from the post-resume live weights
+            (so validation post-resume uses the loaded weights, not the
+            pre-load init), and return the new EMA.
+        (c) ``ema_stage2 is None`` and checkpoint has ``ema_state_dict``
+            → silently ignore the saved EMA, return None.
+        (d) ``ema_stage2 is None`` and checkpoint has nothing → return
+            None.
+
+    The rebuild on case (b) is critical: without it, the EMA would still
+    hold a deepcopy of the freshly-initialized Stage 2 weights from
+    construction time, and the first few validation passes after resume
+    would use garbage instead of the loaded checkpoint.
+    """
+    if ema_stage2 is None:
+        return None
+
+    saved_ema_state = checkpoint.get('ema_state_dict')
+    if saved_ema_state is not None:
+        ema_stage2.load_state_dict(saved_ema_state)
+        logger.info(
+            f'Resumed EMA state from checkpoint '
+            f'(n_averaged={int(ema_stage2.n_averaged.item())})',
+        )
+        return ema_stage2
+
+    logger.warning(
+        f'Checkpoint has no ema_state_dict but this run has '
+        f'--ema-decay={decay}. Rebuilding EMA from the post-resume '
+        f'live weights — first ~{int(1.0 / max(1e-6, 1.0 - decay))} '
+        f'steps will be a warm-up.',
+    )
+    return build_ema_stage2(cascade_model, decay=decay, device=device)
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    """Build the CLI argument parser for ``train_cascade.py``.
+
+    Extracted from ``main()`` so unit tests can introspect defaults and
+    overrides without having to invoke the full training entry point.
+    """
     parser = argparse.ArgumentParser(
         description='Train CascadeModel (Stage 1 → Stage 2)',
     )
@@ -342,6 +498,15 @@ def main():
     parser.add_argument('--save-every', type=int, default=5)
     parser.add_argument('--keep-best-k', type=int, default=5)
     parser.add_argument('--resume', type=str, default=None)
+    parser.add_argument(
+        '--ema-decay', type=float, default=0.0,
+        help='Exponential moving average decay for Stage 2 weights '
+             '(0.0 = disabled, default). When > 0, maintains an EMA copy '
+             'of Stage 2 updated after every optimizer step; validation '
+             'and best-model checkpoints use the EMA weights. '
+             'Typical: 0.999 (half-life ~693 steps) or 0.9999 '
+             '(half-life ~6931 steps, only for very long runs).',
+    )
     parser.add_argument(
         '--optimizer', type=str, default='adamw', choices=OPTIMIZER_NAMES,
         help='Optimizer to use. SOAP and Muon require --amp disabled.',
@@ -382,6 +547,11 @@ def main():
                         help='Weight of the denoising term in total loss '
                              '(default: 0.5)')
 
+    return parser
+
+
+def main():
+    parser = _build_parser()
     args = parser.parse_args()
     device = torch.device(args.device)
 
@@ -548,6 +718,27 @@ def main():
     else:
         logger.info('torch.compile disabled.')
 
+    # ---- Stage 2 EMA (optional, off by default) ----
+    # Wraps ONLY stage2 because stage1 is frozen — wrapping the whole
+    # CascadeModel would waste memory on weights that never change.
+    # When --ema-decay=0.0, build_ema_stage2 returns None and every EMA
+    # hook below is a no-op, so the disabled path is byte-for-byte
+    # identical to the pre-EMA training loop.
+    ema_stage2 = build_ema_stage2(
+        original_model, decay=args.ema_decay, device=device,
+    )
+    if ema_stage2 is not None:
+        ema_shadow_params = sum(
+            parameter.numel() for parameter in ema_stage2.parameters()
+        )
+        logger.info(
+            f'EMA enabled on Stage 2: decay={args.ema_decay} '
+            f'({ema_shadow_params:,} shadow params; '
+            f'BN buffers copied from live before each validation)',
+        )
+    else:
+        logger.info('EMA disabled (--ema-decay=0.0)')
+
     # ---- Optimizer (Stage 2 parameters only; build_optimizer filters frozen) ----
     logger.info(f'Building optimizer: {args.optimizer}')
     optimizer = build_optimizer(
@@ -623,6 +814,16 @@ def main():
             args.resume, map_location=device, weights_only=False,
         )
         original_model.load_state_dict(checkpoint['model_state_dict'])
+        # EMA resume must run AFTER load_state_dict so the rebuild path
+        # (case b in resume_ema_state) sees the post-resume live weights,
+        # not the pre-resume init.
+        ema_stage2 = resume_ema_state(
+            ema_stage2=ema_stage2,
+            checkpoint=checkpoint,
+            cascade_model=original_model,
+            decay=args.ema_decay,
+            device=device,
+        )
         # Skip loading optimizer state if the saved run used a different
         # optimizer — state dicts are not portable across optimizer types.
         saved_optimizer = checkpoint.get('args', {}).get('optimizer', 'adamw')
@@ -664,22 +865,32 @@ def main():
                 tensorboard_writer, global_batch_count,
                 steps_per_epoch, mask_input_index, label_input_index,
                 grad_clip_max_norm=args.grad_clip,
+                ema_stage2=ema_stage2,
             )
 
             eval_steps = max(1, steps_per_epoch // 4)
 
-            val_losses, val_metrics = validate(
-                model, val_loader, device, data_config,
-                mask_input_index, label_input_index,
-                top_k1=args.top_k1,
-                max_steps=eval_steps,
+            # When EMA is enabled, route validation through original_model
+            # (the pre-compile module) so the torch.compile cache never sees
+            # a swapped Stage 2 submodule. When EMA is disabled, keep
+            # passing `model` (the compiled wrapper) so the disabled path
+            # is bit-for-bit identical to the pre-EMA training loop.
+            validation_model = (
+                original_model if ema_stage2 is not None else model
             )
-            train_eval_losses, train_eval_metrics = validate(
-                model, train_loader, device, data_config,
-                mask_input_index, label_input_index,
-                top_k1=args.top_k1,
-                max_steps=eval_steps,
-            )
+            with use_ema_stage2_for_validation(original_model, ema_stage2):
+                val_losses, val_metrics = validate(
+                    validation_model, val_loader, device, data_config,
+                    mask_input_index, label_input_index,
+                    top_k1=args.top_k1,
+                    max_steps=eval_steps,
+                )
+                train_eval_losses, train_eval_metrics = validate(
+                    validation_model, train_loader, device, data_config,
+                    mask_input_index, label_input_index,
+                    top_k1=args.top_k1,
+                    max_steps=eval_steps,
+                )
 
             val_loss = val_losses['total_loss']
             val_recall_at_50 = val_metrics.get('recall_at_50', 0.0)
@@ -786,6 +997,14 @@ def main():
                     'epoch': epoch,
                     'model_state_dict': original_model.state_dict(),
                     'optimizer_state_dict': optimizer.state_dict(),
+                    # Explicit None when EMA is disabled documents "EMA was
+                    # off" vs. "this file predates EMA" for downstream
+                    # checkpoint loaders.
+                    'ema_state_dict': (
+                        ema_stage2.state_dict()
+                        if ema_stage2 is not None
+                        else None
+                    ),
                     'best_val_loss': best_val_loss,
                     'best_val_recall_at_50': best_val_recall_at_50,
                     'best_val_epoch': best_val_epoch,

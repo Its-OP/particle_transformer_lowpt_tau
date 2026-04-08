@@ -280,3 +280,109 @@ class TestCoupleCascadeLoss:
         # 0, 1, or 3 GT couples per event are all valid (depending on
         # how many GT tracks are in the top-K2)
         assert labels.sum().item() in {0, 1, 2, 3, 4, 5, 6}
+
+
+# ---------------------------------------------------------------------------
+# Slim checkpoint: only the trainable couple_reranker is persisted
+# ---------------------------------------------------------------------------
+
+class TestSlimCheckpoint:
+    """The trainer must NOT save the frozen cascade weights into per-epoch
+    checkpoints (the cascade is reloaded from its own checkpoint). Saving
+    only ``couple_reranker.state_dict()`` keeps the per-epoch artifacts
+    small (~few MB instead of hundreds)."""
+
+    def test_couple_reranker_state_dict_has_no_cascade_keys(self):
+        model = _make_couple_cascade()
+        slim_state_dict = model.couple_reranker.state_dict()
+        for key in slim_state_dict:
+            assert not key.startswith('cascade.'), (
+                f'slim state_dict contains cascade key: {key}'
+            )
+
+    def test_slim_state_dict_smaller_than_full_state_dict(self):
+        """The slim state dict should contain dramatically fewer parameter
+        elements than the full ``model.state_dict()`` (which includes the
+        frozen cascade)."""
+        model = _make_couple_cascade()
+        slim = model.couple_reranker.state_dict()
+        full = model.state_dict()
+        slim_numel = sum(t.numel() for t in slim.values())
+        full_numel = sum(t.numel() for t in full.values())
+        assert slim_numel < full_numel
+        # Sanity: cascade is much bigger than the tiny test reranker
+        assert full_numel >= 2 * slim_numel
+
+    def test_round_trip_save_load_via_torch_save(self, tmp_path):
+        """Save the slim state dict, build a fresh model, load it back,
+        and verify every reranker tensor matches bit-for-bit."""
+        model_a = _make_couple_cascade()
+        # Train the reranker for a single backward step so weights drift
+        # away from the random init. This catches save/load bugs that a
+        # zero-init test wouldn't.
+        inputs = _make_inputs()
+        loss_dict = model_a.compute_loss(*inputs)
+        loss_dict['total_loss'].backward()
+        with torch.no_grad():
+            for parameter in model_a.couple_reranker.parameters():
+                if parameter.grad is not None:
+                    parameter.add_(parameter.grad, alpha=-1e-2)
+
+        checkpoint_path = tmp_path / 'slim_checkpoint.pt'
+        torch.save(
+            {'couple_reranker_state_dict': model_a.couple_reranker.state_dict()},
+            checkpoint_path,
+        )
+
+        model_b = _make_couple_cascade()
+        # Confirm model_b's reranker starts DIFFERENT from model_a's so
+        # the assertion below is meaningful.
+        starting_diff = sum(
+            (pa - pb).abs().sum().item()
+            for pa, pb in zip(
+                model_a.couple_reranker.parameters(),
+                model_b.couple_reranker.parameters(),
+                strict=True,
+            )
+        )
+        assert starting_diff > 0
+
+        loaded = torch.load(
+            checkpoint_path, map_location='cpu', weights_only=False,
+        )
+        model_b.couple_reranker.load_state_dict(
+            loaded['couple_reranker_state_dict'],
+        )
+        for (key_a, tensor_a), (key_b, tensor_b) in zip(
+            model_a.couple_reranker.state_dict().items(),
+            model_b.couple_reranker.state_dict().items(),
+            strict=True,
+        ):
+            assert key_a == key_b
+            assert torch.equal(tensor_a, tensor_b), f'mismatch at {key_a}'
+
+    def test_loaded_slim_checkpoint_does_not_touch_cascade(self, tmp_path):
+        """Loading the slim state dict into model_b must NOT change
+        ``model_b.cascade``'s weights — they should still match a fresh
+        cascade build."""
+        model_a = _make_couple_cascade()
+        torch.save(
+            {'couple_reranker_state_dict': model_a.couple_reranker.state_dict()},
+            tmp_path / 'slim.pt',
+        )
+
+        model_b = _make_couple_cascade()
+        cascade_b_before = {
+            name: parameter.detach().clone()
+            for name, parameter in model_b.cascade.named_parameters()
+        }
+        loaded = torch.load(
+            tmp_path / 'slim.pt', map_location='cpu', weights_only=False,
+        )
+        model_b.couple_reranker.load_state_dict(
+            loaded['couple_reranker_state_dict'],
+        )
+        for name, parameter_after in model_b.cascade.named_parameters():
+            assert torch.equal(parameter_after, cascade_b_before[name]), (
+                f'cascade.{name} changed after loading slim checkpoint'
+            )

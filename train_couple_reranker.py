@@ -531,7 +531,13 @@ def main():
         checkpoint = torch.load(
             args.resume, map_location=device, weights_only=False,
         )
-        model.load_state_dict(checkpoint['model_state_dict'])
+        # Slim checkpoint format: only the trainable couple_reranker
+        # weights are persisted; the frozen cascade is rebuilt from
+        # `--cascade-checkpoint` at startup, so it does NOT belong in
+        # per-epoch artifacts.
+        model.couple_reranker.load_state_dict(
+            checkpoint['couple_reranker_state_dict'],
+        )
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         start_epoch = checkpoint.get('epoch', 0) + 1
         best_val_c_at_100 = checkpoint.get('best_val_c_at_100', 0.0)
@@ -650,9 +656,14 @@ def main():
             save_epoch_metrics(epoch_metrics, experiment_dir, epoch)
 
             if epoch % args.save_every == 0 or is_best or epoch == args.epochs:
+                # Slim checkpoint: save ONLY the trainable couple
+                # reranker. The frozen cascade is reloaded from
+                # `--cascade-checkpoint` at startup, so re-saving its
+                # ~280 MB of weights every epoch would just bloat disk.
                 checkpoint = {
                     'epoch': epoch,
-                    'model_state_dict': model.state_dict(),
+                    'couple_reranker_state_dict':
+                        model.couple_reranker.state_dict(),
                     'optimizer_state_dict': optimizer.state_dict(),
                     'best_val_c_at_100': best_val_c_at_100,
                     'best_val_epoch': best_val_epoch,

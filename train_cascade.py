@@ -909,6 +909,10 @@ def main():
                     key = f'recall_at_{k}'
                     if key in metrics:
                         parts.append(f'R@{k}: {metrics[key]:.4f}')
+                for k in [30, 50]:
+                    key = f'perfect_at_{k}'
+                    if key in metrics:
+                        parts.append(f'P@{k}: {metrics[key]:.4f}')
                 if 'd_prime' in metrics:
                     parts.append(f"d': {metrics['d_prime']:.3f}")
                 if 'median_gt_rank' in metrics:

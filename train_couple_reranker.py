@@ -76,39 +76,56 @@ logger = logging.getLogger('train_couple_reranker')
 # the JSON file is self-documenting and the user can read it manually
 # without grepping the code for what each key means.
 
-METRIC_LABELS: dict[str, str] = {
-    'train': 'Train loss (couple ranking, mean per epoch)',
-    'val': 'Validation loss (couple ranking)',
-    'lr': 'Learning rate',
-    'val_eligible_events':
-        'Eligible events (val): events with ≥1 GT couple in candidate pool',
-    'val_total_events':
-        'Total events (val) seen during validation',
-    'val_events_with_full_triplet':
-        'Events (val) with all 3 GT pions in cascade Stage 1 top-K1',
-    'val_mean_first_gt_rank_couples':
-        'Mean rank of best GT couple in reranker output (1-indexed; '
-        'lower is better; averaged over eligible events)',
-}
+def _build_metric_labels(
+    k_values_tracks: list[int],
+    k_values_couples: list[int],
+) -> dict[str, str]:
+    """Build the labelled-metric mapping used by ``save_loss_history``.
 
-# Per-K labels for D@K_tracks, C@K_couples, RC@K_couples are generated
-# programmatically (one per K value) so adding new K values doesn't
-# require touching this constant.
-for _k in (30, 50, 75, 100, 200):
-    METRIC_LABELS[f'val_d_at_{_k}_tracks'] = (
-        f'D@{_k}_tracks: events with ≥2 GT pions in ParT top-{_k} tracks '
-        f'(cascade duplet rate, fixed by checkpoint)'
-    )
-for _k in (50, 75, 100, 200):
-    METRIC_LABELS[f'val_c_at_{_k}_couples'] = (
-        f'C@{_k}_couples: events with ≥1 GT couple in top-{_k} of reranker '
-        f'output (per-event binary)'
-    )
-    METRIC_LABELS[f'val_rc_at_{_k}_couples'] = (
-        f'RC@{_k}_couples: C@{_k}_couples AND full triplet in cascade Stage 1 '
-        f'top-K1=256'
-    )
-del _k
+    The set of D/C/RC keys depends on which K values were configured for
+    this run, so we generate the mapping at runtime instead of carrying
+    a hardcoded dict at module load. This lets sweeps over different K
+    grids (e.g., the top_k2 sweep with K_couples = 50, 60, ..., 200)
+    produce a self-documenting JSON without touching this file.
+
+    Args:
+        k_values_tracks: K values reported for D@K_tracks.
+        k_values_couples: K values reported for C@K_couples and
+            RC@K_couples.
+
+    Returns:
+        ``{metric_key: human label}`` for every key the trainer writes
+        into ``loss_history.json``.
+    """
+    labels: dict[str, str] = {
+        'train': 'Train loss (couple ranking, mean per epoch)',
+        'val': 'Validation loss (couple ranking)',
+        'lr': 'Learning rate',
+        'val_eligible_events':
+            'Eligible events (val): events with ≥1 GT couple in candidate pool',
+        'val_total_events':
+            'Total events (val) seen during validation',
+        'val_events_with_full_triplet':
+            'Events (val) with all 3 GT pions in cascade Stage 1 top-K1',
+        'val_mean_first_gt_rank_couples':
+            'Mean rank of best GT couple in reranker output (1-indexed; '
+            'lower is better; averaged over eligible events)',
+    }
+    for k in k_values_tracks:
+        labels[f'val_d_at_{k}_tracks'] = (
+            f'D@{k}_tracks: events with ≥2 GT pions in ParT top-{k} tracks '
+            f'(cascade duplet rate, fixed by checkpoint)'
+        )
+    for k in k_values_couples:
+        labels[f'val_c_at_{k}_couples'] = (
+            f'C@{k}_couples: events with ≥1 GT couple in top-{k} of reranker '
+            f'output (per-event binary)'
+        )
+        labels[f'val_rc_at_{k}_couples'] = (
+            f'RC@{k}_couples: C@{k}_couples AND full triplet in cascade '
+            f'Stage 1 top-K1=256'
+        )
+    return labels
 
 
 # ---------------------------------------------------------------------------
@@ -235,14 +252,16 @@ def validate(
     mask_input_index: int,
     label_input_index: int,
     max_steps: int | None = None,
+    k_values_couples: tuple[int, ...] = (50, 75, 100, 200),
+    k_values_tracks: tuple[int, ...] = (30, 50, 75, 100, 200),
 ) -> tuple[dict[str, float], dict[str, float]]:
     """Validate and compute couple_recall@K metrics on the val set."""
     model.eval()
     loss_accumulators: dict[str, float] | None = None
     num_batches = 0
     couple_metrics_accumulator = CoupleMetricsAccumulator(
-        k_values_couples=(50, 75, 100, 200),
-        k_values_tracks=(30, 50, 75, 100, 200),
+        k_values_couples=tuple(k_values_couples),
+        k_values_tracks=tuple(k_values_tracks),
     )
 
     for batch_index, (X, _, _) in enumerate(val_loader):
@@ -338,6 +357,29 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument('--couple-dropout', type=float, default=0.1)
     parser.add_argument('--couple-ranking-num-samples', type=int, default=50)
     parser.add_argument('--couple-ranking-temperature', type=float, default=1.0)
+    # K values for the validation metrics. The set of K values reported
+    # for D@K_tracks (cascade-side) and C/RC@K_couples (reranker-side)
+    # is configurable so sweeps can use a denser grid (e.g. step 10).
+    # The selection criterion is C@100_couples — 100 must be present in
+    # `--k-values-couples`.
+    parser.add_argument(
+        '--k-values-tracks',
+        type=int,
+        nargs='+',
+        default=[30, 50, 75, 100, 200],
+        help='K values for D@K_tracks (default: 30 50 75 100 200)',
+    )
+    parser.add_argument(
+        '--k-values-couples',
+        type=int,
+        nargs='+',
+        default=[50, 75, 100, 200],
+        help=(
+            'K values for C@K_couples and RC@K_couples '
+            '(default: 50 75 100 200). 100 must be in this list because '
+            'the selection criterion is C@100_couples.'
+        ),
+    )
     return parser
 
 
@@ -349,6 +391,22 @@ def main():
     parser = _build_parser()
     args = parser.parse_args()
     device = torch.device(args.device)
+
+    # The selection criterion (best-checkpoint metric) is C@100_couples,
+    # so K=100 must be present. Catch typos before any work happens.
+    if 100 not in args.k_values_couples:
+        parser.error(
+            '--k-values-couples must include 100 (the selection criterion '
+            f'is C@100_couples). Got: {args.k_values_couples}',
+        )
+
+    # Build the labelled-metric mapping for save_loss_history. Done in
+    # main() (after argparse) so the keys reflect the K grid this run
+    # was launched with.
+    metric_labels = _build_metric_labels(
+        k_values_tracks=args.k_values_tracks,
+        k_values_couples=args.k_values_couples,
+    )
 
     # ---- Experiment directory ----
     resume_dir = None
@@ -455,6 +513,10 @@ def main():
         data_config,
         cascade_checkpoint=args.cascade_checkpoint,
         top_k2=args.top_k2,
+        # Forward the configured K_tracks grid so the cascade glue
+        # model's `n_gt_in_top_k_tracks` tensor matches the shape the
+        # validation accumulator expects.
+        k_values_tracks=tuple(args.k_values_tracks),
         couple_hidden_dim=args.couple_hidden_dim,
         couple_num_residual_blocks=args.couple_num_residual_blocks,
         couple_dropout=args.couple_dropout,
@@ -569,6 +631,8 @@ def main():
                 model, val_loader, device, data_config,
                 mask_input_index, label_input_index,
                 max_steps=eval_steps,
+                k_values_couples=tuple(args.k_values_couples),
+                k_values_tracks=tuple(args.k_values_tracks),
             )
 
             val_loss = val_losses['total_loss']
@@ -592,6 +656,8 @@ def main():
                 best_val_criterion=best_val_c_at_100,
                 best_val_epoch=best_val_epoch,
                 criterion_name='C@100c',
+                k_values_tracks=tuple(args.k_values_tracks),
+                k_values_couples=tuple(args.k_values_couples),
             )
             logger.info('\n' + val_table)
 
@@ -617,7 +683,7 @@ def main():
                 if metric_key in loss_history:
                     loss_history[metric_key].append(metric_value)
             save_loss_history(
-                loss_history, experiment_dir, metric_labels=METRIC_LABELS,
+                loss_history, experiment_dir, metric_labels=metric_labels,
             )
 
             epoch_metrics = {

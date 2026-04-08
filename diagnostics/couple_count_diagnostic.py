@@ -20,7 +20,7 @@ defines what the future couple reranker must beat.
 
 Usage (MPS, ~5k events):
     /opt/miniconda3/envs/part/bin/python diagnostics/couple_count_diagnostic.py \\
-        --checkpoint models/debug_checkpoints/cascade_soap_Cascade_20260406_202001/checkpoints/best_model.pt \\
+        --checkpoint models/cascade_best.pt \\
         --stage1-checkpoint models/prefilter_best.pt \\
         --data-config data/low-pt/lowpt_tau_trackfinder.yaml \\
         --data-dir data/low-pt/val/ \\

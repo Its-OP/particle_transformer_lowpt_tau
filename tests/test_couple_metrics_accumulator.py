@@ -251,7 +251,15 @@ class TestPaddingMask:
 # ---------------------------------------------------------------------------
 
 class TestMultiEvent:
-    def test_average_over_eligible_events(self):
+    def test_average_uses_total_events_not_eligible(self):
+        """Denominator for C/RC is total_events (4), not eligible (3).
+
+        Setup: 4 events. Events 0, 1 have GT in top-50; event 2 has GT
+        at rank 101 (outside top-50); event 3 has no GT couple at all.
+        Numerator for C@50 is 2 (events 0, 1). With denom = 4,
+        C@50 = 2/4 = 0.5. Same for RC@50 since all eligible events
+        have a full triplet in K1.
+        """
         accumulator = _accumulator(k_values_couples=(50,))
         n_couples = 200
         scores = torch.zeros(4, n_couples)
@@ -263,14 +271,16 @@ class TestMultiEvent:
         labels[1, 0] = 1.0
         scores[2] = torch.linspace(1.0, 0.0, n_couples)
         labels[2, 100] = 1.0
-        # Event 3: no GT couple → excluded from C/RC
+        # Event 3: no GT couple
         n_gt_in_top_k1 = torch.tensor([3, 3, 3, 3])
         accumulator.update(scores, labels, mask, n_gt_in_top_k1=n_gt_in_top_k1)
         metrics = accumulator.compute()
+        assert metrics['total_events'] == 4
         assert metrics['eligible_events'] == 3
         assert metrics['events_with_full_triplet'] == 3
-        assert abs(metrics['c_at_50_couples'] - 2.0 / 3.0) < 1e-6
-        assert abs(metrics['rc_at_50_couples'] - 2.0 / 3.0) < 1e-6
+        # 2 of 4 total events have a GT couple in top-50 of the reranker
+        assert metrics['c_at_50_couples'] == 0.5
+        assert metrics['rc_at_50_couples'] == 0.5
 
     def test_rc_smaller_than_c_when_some_have_partial_triplet(self):
         accumulator = _accumulator(k_values_couples=(50,))
@@ -315,3 +325,265 @@ class TestCrossBatch:
         assert metrics['eligible_events'] == 2
         assert metrics['c_at_50_couples'] == 0.5
         assert metrics['rc_at_50_couples'] == 0.5
+
+
+# ---------------------------------------------------------------------------
+# Mean rank of first GT couple
+# ---------------------------------------------------------------------------
+
+class TestMeanFirstGtRankCouples:
+    """Mean rank of the highest-scoring GT couple per event.
+
+    Convention: 1-indexed (rank 1 = best), averaged over eligible events
+    only (events with ≥1 GT couple in the candidate pool). Lower is better.
+    """
+
+    def test_perfect_ranking_yields_rank_one(self):
+        accumulator = _accumulator(k_values_couples=(50,))
+        n_couples = 200
+        scores = torch.zeros(1, n_couples)
+        scores[0, 0] = 100.0
+        labels = torch.zeros(1, n_couples)
+        labels[0, 0] = 1.0
+        mask = torch.ones(1, n_couples)
+        accumulator.update(scores, labels, mask)
+        metrics = accumulator.compute()
+        assert metrics['mean_first_gt_rank_couples'] == 1.0
+
+    def test_gt_at_descending_position_75_yields_rank_76(self):
+        accumulator = _accumulator(k_values_couples=(50, 100))
+        n_couples = 200
+        # scores strictly descending: index 0 is rank 1, index 75 is rank 76
+        scores = torch.linspace(1.0, 0.0, n_couples).unsqueeze(0)
+        labels = torch.zeros(1, n_couples)
+        labels[0, 75] = 1.0
+        mask = torch.ones(1, n_couples)
+        accumulator.update(scores, labels, mask)
+        metrics = accumulator.compute()
+        assert metrics['mean_first_gt_rank_couples'] == 76.0
+
+    def test_multi_gt_uses_best_rank(self):
+        """If an event has 3 GT couples at sorted positions 5, 10, 80, the
+        mean should reflect rank 6 (the best of the three), not the worst
+        and not the mean within the event."""
+        accumulator = _accumulator(k_values_couples=(50,))
+        n_couples = 200
+        scores = torch.linspace(1.0, 0.0, n_couples).unsqueeze(0)
+        labels = torch.zeros(1, n_couples)
+        labels[0, 5] = 1.0
+        labels[0, 10] = 1.0
+        labels[0, 80] = 1.0
+        mask = torch.ones(1, n_couples)
+        accumulator.update(scores, labels, mask)
+        metrics = accumulator.compute()
+        assert metrics['mean_first_gt_rank_couples'] == 6.0
+
+    def test_multi_event_averaging(self):
+        accumulator = _accumulator(k_values_couples=(50,))
+        n_couples = 200
+        # Three events with first GT at sorted ranks 1, 11, 51 → mean = 21
+        scores = torch.zeros(3, n_couples)
+        labels = torch.zeros(3, n_couples)
+        mask = torch.ones(3, n_couples)
+        # Event 0: GT at descending rank 1 (highest score)
+        scores[0] = torch.linspace(1.0, 0.0, n_couples)
+        labels[0, 0] = 1.0
+        # Event 1: GT at descending rank 11 (index 10)
+        scores[1] = torch.linspace(1.0, 0.0, n_couples)
+        labels[1, 10] = 1.0
+        # Event 2: GT at descending rank 51 (index 50)
+        scores[2] = torch.linspace(1.0, 0.0, n_couples)
+        labels[2, 50] = 1.0
+        accumulator.update(scores, labels, mask)
+        metrics = accumulator.compute()
+        # (1 + 11 + 51) / 3 = 21
+        assert abs(metrics['mean_first_gt_rank_couples'] - 21.0) < 1e-6
+        assert metrics['eligible_events'] == 3
+
+    def test_event_with_no_gt_excluded_from_mean(self):
+        accumulator = _accumulator(k_values_couples=(50,))
+        n_couples = 200
+        scores = torch.zeros(2, n_couples)
+        labels = torch.zeros(2, n_couples)
+        mask = torch.ones(2, n_couples)
+        # Event 0 has GT at rank 1, event 1 has none
+        scores[0, 0] = 100.0
+        labels[0, 0] = 1.0
+        accumulator.update(scores, labels, mask)
+        metrics = accumulator.compute()
+        # Only event 0 is eligible → mean = 1.0 (event 1 ignored)
+        assert metrics['eligible_events'] == 1
+        assert metrics['mean_first_gt_rank_couples'] == 1.0
+
+    def test_zero_eligible_events_yields_zero(self):
+        accumulator = _accumulator(k_values_couples=(50,))
+        n_couples = 200
+        scores = torch.zeros(1, n_couples)
+        labels = torch.zeros(1, n_couples)
+        mask = torch.ones(1, n_couples)
+        accumulator.update(scores, labels, mask)
+        metrics = accumulator.compute()
+        assert metrics['eligible_events'] == 0
+        assert metrics['mean_first_gt_rank_couples'] == 0.0
+
+    def test_padded_couples_do_not_inflate_rank(self):
+        """Padded positions sit at the bottom of the ranking and must not
+        push the GT couple to a worse rank."""
+        accumulator = _accumulator(k_values_couples=(50,))
+        n_couples = 200
+        scores = torch.zeros(1, n_couples)
+        # Padded couples have huge scores but must be masked out
+        scores[0, 100:] = 1000.0
+        scores[0, 0] = 1.0
+        labels = torch.zeros(1, n_couples)
+        labels[0, 0] = 1.0
+        mask = torch.zeros(1, n_couples)
+        mask[0, :100] = 1.0
+        accumulator.update(scores, labels, mask)
+        metrics = accumulator.compute()
+        # Ranking restricted to valid: GT is the only positive score → rank 1
+        assert metrics['mean_first_gt_rank_couples'] == 1.0
+
+    def test_accumulates_across_batches(self):
+        accumulator = _accumulator(k_values_couples=(50,))
+        n_couples = 200
+        # Batch 1: GT at rank 1
+        scores_1 = torch.zeros(1, n_couples)
+        scores_1[0, 0] = 100.0
+        labels_1 = torch.zeros(1, n_couples)
+        labels_1[0, 0] = 1.0
+        accumulator.update(scores_1, labels_1, torch.ones(1, n_couples))
+        # Batch 2: GT at rank 11
+        scores_2 = torch.linspace(1.0, 0.0, n_couples).unsqueeze(0)
+        labels_2 = torch.zeros(1, n_couples)
+        labels_2[0, 10] = 1.0
+        accumulator.update(scores_2, labels_2, torch.ones(1, n_couples))
+        metrics = accumulator.compute()
+        # (1 + 11) / 2 = 6
+        assert metrics['eligible_events'] == 2
+        assert metrics['mean_first_gt_rank_couples'] == 6.0
+
+
+# ---------------------------------------------------------------------------
+# Denominator invariant: RC ≤ C ≤ D@K_tracks when K_tracks ≥ K2
+# ---------------------------------------------------------------------------
+
+class TestDenominatorInvariant:
+    """Regression tests for the metric-comparability invariant.
+
+    For any event with a GT couple in the candidate pool (eligible),
+    BOTH GT pions of that couple must already be in the cascade's
+    top-K2 selection. So when ``K_tracks ≥ K2``, the eligible-events
+    set is a subset of the D@K_tracks-positive set, and:
+
+        RC@K_couples ≤ C@K_couples ≤ D@K_tracks
+
+    must hold structurally. This requires C, RC, and D to share the
+    same denominator (= total_events). The original implementation
+    used ``eligible_events`` for C/RC and ``total_events`` for D,
+    which produced a paradox where RC > D was reported.
+    """
+
+    def test_rc_does_not_exceed_d_at_same_k(self):
+        """4 events. 3 are eligible AND have ≥2 GT pions in top-100t
+        AND have full triplet in K1 AND the reranker puts the GT couple
+        at the top. The 4th event has nothing.
+
+        Old behavior:  c=rc=3/3=1.000, d=3/4=0.750  →  rc > d (paradox)
+        New behavior:  c=rc=3/4=0.750, d=3/4=0.750  →  rc ≤ c ≤ d ✓
+        """
+        accumulator = _accumulator(
+            k_values_couples=(100,),
+            k_values_tracks=(100,),
+        )
+        n_couples = 200
+        scores = torch.zeros(4, n_couples)
+        labels = torch.zeros(4, n_couples)
+        mask = torch.ones(4, n_couples)
+        # Events 0-2: GT couple at the top of the score list
+        scores[:3, 0] = 100.0
+        labels[:3, 0] = 1.0
+        # Event 3: no GT couple
+        n_gt_in_top_k1 = torch.tensor([3, 3, 3, 0])
+        n_gt_in_top_k_tracks = torch.tensor([[3], [3], [3], [0]])
+        accumulator.update(
+            scores, labels, mask,
+            n_gt_in_top_k1=n_gt_in_top_k1,
+            n_gt_in_top_k_tracks=n_gt_in_top_k_tracks,
+        )
+        metrics = accumulator.compute()
+        # All four events count toward the denominator
+        assert metrics['total_events'] == 4
+        assert metrics['eligible_events'] == 3
+        # RC ≤ C ≤ D (all = 0.75)
+        assert metrics['d_at_100_tracks'] == 0.75
+        assert metrics['c_at_100_couples'] == 0.75
+        assert metrics['rc_at_100_couples'] == 0.75
+        assert (
+            metrics['rc_at_100_couples']
+            <= metrics['c_at_100_couples']
+            <= metrics['d_at_100_tracks']
+        )
+
+    def test_c_uses_total_events_denominator(self):
+        """Two events: one eligible with GT at rank 1, one ineligible.
+        C@50 should be 1/2, not 1/1."""
+        accumulator = _accumulator(
+            k_values_couples=(50,),
+            k_values_tracks=(50,),
+        )
+        n_couples = 200
+        scores = torch.zeros(2, n_couples)
+        labels = torch.zeros(2, n_couples)
+        mask = torch.ones(2, n_couples)
+        scores[0, 0] = 100.0
+        labels[0, 0] = 1.0
+        n_gt_in_top_k_tracks = torch.tensor([[3], [0]])
+        accumulator.update(
+            scores, labels, mask,
+            n_gt_in_top_k_tracks=n_gt_in_top_k_tracks,
+        )
+        metrics = accumulator.compute()
+        assert metrics['total_events'] == 2
+        assert metrics['eligible_events'] == 1
+        assert metrics['c_at_50_couples'] == 0.5  # 1 / 2, not 1 / 1
+        assert metrics['d_at_50_tracks'] == 0.5
+
+    def test_rc_uses_total_events_denominator(self):
+        """3 events: 2 eligible with full triplet + GT couple at top,
+        1 ineligible. RC@50 = 2/3, not 2/2."""
+        accumulator = _accumulator(k_values_couples=(50,))
+        n_couples = 200
+        scores = torch.zeros(3, n_couples)
+        labels = torch.zeros(3, n_couples)
+        mask = torch.ones(3, n_couples)
+        scores[:2, 0] = 100.0
+        labels[:2, 0] = 1.0
+        n_gt_in_top_k1 = torch.tensor([3, 3, 0])
+        accumulator.update(
+            scores, labels, mask,
+            n_gt_in_top_k1=n_gt_in_top_k1,
+        )
+        metrics = accumulator.compute()
+        assert metrics['total_events'] == 3
+        assert metrics['eligible_events'] == 2
+        assert abs(metrics['c_at_50_couples'] - 2.0 / 3.0) < 1e-6
+        assert abs(metrics['rc_at_50_couples'] - 2.0 / 3.0) < 1e-6
+
+    def test_mean_rank_still_uses_eligible_denominator(self):
+        """The mean rank metric is undefined for events with no GT
+        couple, so it must continue to use eligible_events as its
+        denominator (events without GT contribute nothing)."""
+        accumulator = _accumulator(k_values_couples=(50,))
+        n_couples = 200
+        scores = torch.zeros(2, n_couples)
+        labels = torch.zeros(2, n_couples)
+        mask = torch.ones(2, n_couples)
+        # Event 0: GT at rank 1; Event 1: no GT couple
+        scores[0, 0] = 100.0
+        labels[0, 0] = 1.0
+        accumulator.update(scores, labels, mask)
+        metrics = accumulator.compute()
+        assert metrics['eligible_events'] == 1
+        # Mean rank averages over the 1 eligible event, not 2
+        assert metrics['mean_first_gt_rank_couples'] == 1.0

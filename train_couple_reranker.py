@@ -85,6 +85,9 @@ METRIC_LABELS: dict[str, str] = {
         'Total events (val) seen during validation',
     'val_events_with_full_triplet':
         'Events (val) with all 3 GT pions in cascade Stage 1 top-K1',
+    'val_mean_first_gt_rank_couples':
+        'Mean rank of best GT couple in reranker output (1-indexed; '
+        'lower is better; averaged over eligible events)',
 }
 
 # Per-K labels for D@K_tracks, C@K_couples, RC@K_couples are generated
@@ -582,6 +585,10 @@ def main():
                     f'RC@{k}c: {metrics.get(f"rc_at_{k}_couples", 0.0):.4f}'
                     for k in (50, 75, 100, 200)
                 ]
+                if 'mean_first_gt_rank_couples' in metrics:
+                    parts.append(
+                        f'mean_rank: {metrics["mean_first_gt_rank_couples"]:.1f}',
+                    )
                 if 'eligible_events' in metrics:
                     parts.append(
                         f'eligible: {int(metrics["eligible_events"])}',

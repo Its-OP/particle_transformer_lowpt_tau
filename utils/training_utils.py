@@ -508,16 +508,17 @@ class CoupleMetricsAccumulator:
     GT couple is in the top-K of the model's couple ranking. K refers to
     a number of *couples*. This is the primary metric the reranker
     optimizes. Multiple GT couples in the same event do NOT inflate the
-    metric: each event contributes 0 or 1.
+    metric: each event contributes 0 or 1. Events with no GT couple in
+    the candidate pool contribute 0.
 
-        C@K_couples = mean over eligible events of:
+        C@K_couples = mean over ALL events of:
                         1[ any GT couple in top-K_couples of reranker ]
 
     **RC@K_couples** (Reconstructable at K couples): the joint condition
     that we both found a couple AND have the full triplet available
     downstream:
 
-        RC@K_couples = mean over eligible events of:
+        RC@K_couples = mean over ALL events of:
                          1[ any GT couple in top-K_couples ]
                        × 1[ n_gt_in_top_k1 == 3 ]
 
@@ -526,12 +527,30 @@ class CoupleMetricsAccumulator:
     ``C@K_couples − RC@K_couples`` is the events where the couple was
     found but the third pion was filtered by Stage 1.
 
-    C and RC share the same denominator: **events with at least one GT
-    couple in the per-event candidate pool**. So ``RC@K ≤ C@K`` always
-    holds. D has its own denominator: **all events** the accumulator
-    sees (since duplets can be measured even on events with no GT couple
-    in the candidate pool — the cascade output is independent of the
-    candidate pool restriction).
+    **mean_first_gt_rank_couples** (Mean rank of best GT couple): per
+    eligible event, the 1-indexed rank of the highest-scoring GT couple
+    in the model's per-event ranking, averaged across eligible events.
+    Lower is better. Independent of K (no top-K cutoff). For an event
+    with multiple GT couples, only the BEST rank contributes — this is
+    the K-free analogue of C@K_couples.
+
+        mean_first_gt_rank_couples =
+            mean over eligible events of:
+              1 + min over (GT couples in event) of (rank in sorted order)
+
+    All three metrics (D, C, RC) use the **same denominator**: every
+    event the accumulator sees. This is the only way the comparison
+    ``RC@K_couples ≤ C@K_couples ≤ D@K_tracks`` (whenever
+    ``K_tracks ≥ K2``) holds structurally — and it must, because every
+    GT couple in the reranker's input requires the cascade to have
+    surfaced both pions in its top-K2 ⊆ top-K_tracks selection.
+
+    Mean rank is the only metric that uses the **eligible-events
+    denominator**, because rank is undefined for events without a GT
+    couple. The bookkeeping fields ``eligible_events`` and
+    ``total_events`` are reported so callers can recover the
+    conditional version of any rate (e.g., ``c_at_K * total /
+    eligible``) if they need it.
 
     Usage:
         accumulator = CoupleMetricsAccumulator(
@@ -567,11 +586,17 @@ class CoupleMetricsAccumulator:
         self.k_values_tracks = k_values_tracks
         self.full_triplet_threshold = full_triplet_threshold
         self.duplet_threshold = duplet_threshold
-        # C / RC accumulators (denominator = eligible events)
+        # C / RC numerator accumulators (denominator = total_events_count,
+        # SAME as D — see class docstring for the comparability invariant).
         self.c_sums: dict[int, float] = {k: 0.0 for k in k_values_couples}
         self.rc_sums: dict[int, float] = {k: 0.0 for k in k_values_couples}
+        # Bookkeeping (also used as the denominator for mean rank)
         self.eligible_events_count: int = 0
         self.events_with_full_triplet_count: int = 0
+        # Mean-rank accumulator (denominator = eligible events — rank is
+        # undefined for events without a GT couple).
+        # Sums the 1-indexed rank of the highest-scoring GT couple per event.
+        self.first_gt_rank_sum: float = 0.0
         # D accumulator (denominator = all events seen)
         self.d_sums: dict[int, float] = {k: 0.0 for k in k_values_tracks}
         self.total_events_count: int = 0
@@ -629,6 +654,13 @@ class CoupleMetricsAccumulator:
 
             self.eligible_events_count += 1
 
+            # First (best) GT couple rank, 1-indexed. We know sorted_gt
+            # has at least one True position because gt_mask.any() passed
+            # the early-continue check above.
+            #     rank = 1 + argmax over sorted positions of the GT mask
+            first_gt_position = int(sorted_gt.float().argmax().item())
+            self.first_gt_rank_sum += float(first_gt_position + 1)
+
             full_triplet_present = False
             if n_gt_in_top_k1 is not None:
                 full_triplet_present = bool(
@@ -652,18 +684,32 @@ class CoupleMetricsAccumulator:
             ``d_at_K_tracks`` for each K in ``k_values_tracks``
                 (denominator: all events seen)
             ``c_at_K_couples``, ``rc_at_K_couples`` for each K in
-                ``k_values_couples`` (denominator: eligible events)
+                ``k_values_couples``
+                (denominator: all events seen — SAME as D so the
+                comparison ``RC ≤ C ≤ D@K_tracks`` (when ``K_tracks ≥ K2``)
+                holds structurally)
+            ``mean_first_gt_rank_couples``
+                (denominator: eligible events — rank is undefined for
+                events with no GT couple)
             bookkeeping: ``eligible_events``, ``total_events``,
                 ``events_with_full_triplet``
         """
-        eligible = max(1, self.eligible_events_count)
         total = max(1, self.total_events_count)
         metrics: dict[str, float] = {}
         for k in self.k_values_tracks:
             metrics[f'd_at_{k}_tracks'] = self.d_sums[k] / total
         for k in self.k_values_couples:
-            metrics[f'c_at_{k}_couples'] = self.c_sums[k] / eligible
-            metrics[f'rc_at_{k}_couples'] = self.rc_sums[k] / eligible
+            metrics[f'c_at_{k}_couples'] = self.c_sums[k] / total
+            metrics[f'rc_at_{k}_couples'] = self.rc_sums[k] / total
+        # When eligible_events == 0 we report 0.0 (sentinel) — there is
+        # no GT couple to rank, so the metric is undefined; the
+        # bookkeeping ``eligible_events`` field disambiguates.
+        if self.eligible_events_count == 0:
+            metrics['mean_first_gt_rank_couples'] = 0.0
+        else:
+            metrics['mean_first_gt_rank_couples'] = (
+                self.first_gt_rank_sum / self.eligible_events_count
+            )
         metrics['eligible_events'] = self.eligible_events_count
         metrics['total_events'] = self.total_events_count
         metrics['events_with_full_triplet'] = self.events_with_full_triplet_count

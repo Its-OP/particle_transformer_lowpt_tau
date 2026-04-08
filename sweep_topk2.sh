@@ -4,23 +4,30 @@
 # `--top-k2` (the number of cascade-Stage-2 tracks fed into couple
 # enumeration). Sequential — single GPU.
 #
+# Self-detaches into a screen session named `topk2_sweep` and starts a
+# second screen `topk2_sweep_gpu` running `watch -n 1 nvidia-smi`. The
+# launching shell exits immediately after printing reattach instructions,
+# so you can run this from ssh and walk away.
+#
 # Each subrun gets its own folder under
 #     experiments/topk2_sweep_<timestamp>/topk2_<K>/
-# and the trainer's normal experiment dir lands inside that. After all
-# subruns finish (or even partway through, if the script is interrupted),
-# `diagnostics/aggregate_couple_sweep.py` collects every subrun's
-# loss_history.json into:
+# and the trainer's normal experiment dir lands inside that. After every
+# subrun (and at the end), `diagnostics/aggregate_couple_sweep.py`
+# collects each subrun's loss_history.json into:
 #     experiments/topk2_sweep_<timestamp>/sweep_summary.json
 #     experiments/topk2_sweep_<timestamp>/sweep_summary.md
 #
 # All training output for one subrun is also tee'd to
 #     experiments/topk2_sweep_<timestamp>/topk2_<K>/training.log
+# and the sweep-level orchestration log lives at
+#     experiments/topk2_sweep_<timestamp>/sweep.log
 # so you can grep across runs without opening every per-subrun directory.
 #
 # Usage:
 #   bash sweep_topk2.sh                          # default: 10 K values
 #   TOP_K2_VALUES="50 100 200" bash sweep_topk2.sh
 #   EPOCHS=30 BATCH_SIZE=64 bash sweep_topk2.sh
+#   NO_SCREEN=1 bash sweep_topk2.sh              # run inline (debugging)
 #
 # Overnight estimate: with the defaults below (10 values × 50 epochs ×
 # 100 steps × batch 96), expect ~10-16 hours on a single GPU — total
@@ -74,16 +81,134 @@ NETWORK="networks/lowpt_tau_CoupleReranker.py"
 CASCADE_CHECKPOINT="models/cascade_best.pt"
 CONDA_ENV_NAME="part"
 
-# ---- Resolve script directory + sweep root ----
+# ---- Screen session names ----
+SESSION_SWEEP="topk2_sweep"
+SESSION_GPU="topk2_sweep_gpu"
+
+# ---- Resolve script directory ----
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SWEEP_TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
-SWEEP_ROOT="${SCRIPT_DIR}/experiments/topk2_sweep_${SWEEP_TIMESTAMP}"
-mkdir -p "${SWEEP_ROOT}"
+
+# =============================================================================
+# Phase 1 — Pre-flight checks (run BEFORE relaunching in screen so the user
+# sees errors immediately, on the launching terminal).
+# =============================================================================
+
+if [ ! -f "${SCRIPT_DIR}/${CASCADE_CHECKPOINT}" ]; then
+    echo "ERROR: Cascade checkpoint not found: ${SCRIPT_DIR}/${CASCADE_CHECKPOINT}"
+    echo "  Build the cascade first via train_cascade.sh, or symlink an"
+    echo "  existing checkpoint into models/cascade_best.pt."
+    exit 1
+fi
+
+TRAIN_PARQUET_COUNT=$(find "${SCRIPT_DIR}/${DATA_DIR}" -maxdepth 1 -name "*.parquet" 2>/dev/null | wc -l | tr -d ' ')
+VAL_PARQUET_COUNT=$(find "${SCRIPT_DIR}/${VAL_DATA_DIR}" -maxdepth 1 -name "*.parquet" 2>/dev/null | wc -l | tr -d ' ')
+if [ "$TRAIN_PARQUET_COUNT" -lt 10 ] || [ "$VAL_PARQUET_COUNT" -lt 10 ]; then
+    echo "WARNING: Found ${TRAIN_PARQUET_COUNT} train and ${VAL_PARQUET_COUNT} val parquet files."
+fi
+
+# =============================================================================
+# Phase 2 — Self-relaunch in a detached screen session.
+#
+# `STY` is set inside any screen session and unset outside, so we use it
+# to detect whether this invocation is the user's interactive launch or
+# the relaunched copy running inside screen. The user can opt out via
+# NO_SCREEN=1 (useful for testing/debugging — the loop runs inline).
+# =============================================================================
+
+if [ -z "${STY:-}" ] && [ "${NO_SCREEN:-0}" != "1" ]; then
+    # Refuse to clobber an existing sweep session — the previous one
+    # could still be running.
+    if screen -list 2>/dev/null | grep -q "\.${SESSION_SWEEP}"; then
+        echo "Screen session '${SESSION_SWEEP}' already exists."
+        echo "Reattach: screen -r ${SESSION_SWEEP}"
+        echo "Kill it:  screen -S ${SESSION_SWEEP} -X quit"
+        exit 1
+    fi
+
+    # Tear down any stale GPU monitor from a previous sweep.
+    screen -list 2>/dev/null | grep "\.${SESSION_GPU}" | awk '{print $1}' \
+        | while read -r session_id; do
+            screen -S "$session_id" -X quit 2>/dev/null || true
+        done || true
+
+    # Create the sweep root NOW so the user-facing banner shows the same
+    # path that the inner script will use, and so they can `cd` into it
+    # immediately and watch logs accumulate. The relaunched copy reads
+    # SWEEP_ROOT_OVERRIDE from the environment instead of generating a
+    # new timestamp.
+    SWEEP_TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
+    SWEEP_ROOT="${SCRIPT_DIR}/experiments/topk2_sweep_${SWEEP_TIMESTAMP}"
+    mkdir -p "${SWEEP_ROOT}"
+    export SWEEP_ROOT_OVERRIDE="${SWEEP_ROOT}"
+
+    # Optional GPU monitor session (only if nvidia-smi exists).
+    GPU_MONITOR_AVAILABLE=0
+    if command -v nvidia-smi &>/dev/null; then
+        screen -dmS "${SESSION_GPU}" bash -c "watch -n 1 nvidia-smi"
+        GPU_MONITOR_AVAILABLE=1
+    fi
+
+    # Relaunch self in a detached screen. The trailing `read` keeps the
+    # session alive after the loop finishes so the user can attach and
+    # see the final summary.
+    screen -dmS "${SESSION_SWEEP}" bash -c "
+        bash '${BASH_SOURCE[0]}'
+        echo ''
+        echo '--- Sweep finished. Press Enter to close this screen session. ---'
+        read
+    "
+
+    NUM_K_VALUES=$(echo "${TOP_K2_VALUES}" | wc -w | tr -d ' ')
+    echo "============================================================"
+    echo "  CoupleReranker top_k2 sweep launched in screen"
+    echo "============================================================"
+    echo ""
+    echo "Sweep session:    ${SESSION_SWEEP}"
+    if [ "${GPU_MONITOR_AVAILABLE}" -eq 1 ]; then
+        echo "GPU monitor:      ${SESSION_GPU}"
+    fi
+    echo "Sweep root:       ${SWEEP_ROOT}"
+    echo ""
+    echo "K values:         ${TOP_K2_VALUES} (${NUM_K_VALUES} total)"
+    echo "Epochs/run:       ${EPOCHS}"
+    echo "Steps/epoch:      ${STEPS_PER_EPOCH}"
+    echo "Batch size:       ${BATCH_SIZE}"
+    echo "Learning rate:    ${LEARNING_RATE}"
+    echo "Device:           ${DEVICE}"
+    echo ""
+    echo "Reattach sweep:   screen -r ${SESSION_SWEEP}"
+    if [ "${GPU_MONITOR_AVAILABLE}" -eq 1 ]; then
+        echo "Reattach gpu:     screen -r ${SESSION_GPU}"
+    fi
+    echo "Detach:           Ctrl+A, then D"
+    echo "Kill sweep:       screen -S ${SESSION_SWEEP} -X quit"
+    echo ""
+    echo "Tail sweep log:   tail -f ${SWEEP_ROOT}/sweep.log"
+    echo "Live summary:     watch -n 30 cat ${SWEEP_ROOT}/sweep_summary.md"
+    echo ""
+    exit 0
+fi
+
+# =============================================================================
+# Phase 3 — Inside the screen session (or NO_SCREEN=1 inline mode).
+# Run the actual sweep loop.
+# =============================================================================
+
+# Use the sweep root from the launching shell if it was set, so the
+# inner banner matches the outer one. Otherwise (NO_SCREEN=1 path),
+# generate a fresh timestamp.
+if [ -n "${SWEEP_ROOT_OVERRIDE:-}" ]; then
+    SWEEP_ROOT="${SWEEP_ROOT_OVERRIDE}"
+else
+    SWEEP_TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
+    SWEEP_ROOT="${SCRIPT_DIR}/experiments/topk2_sweep_${SWEEP_TIMESTAMP}"
+    mkdir -p "${SWEEP_ROOT}"
+fi
 
 SWEEP_LOG="${SWEEP_ROOT}/sweep.log"
 exec > >(tee -a "${SWEEP_LOG}") 2>&1
 
-# ---- Resolve conda ----
+# ---- Conda activation (inside screen) ----
 if command -v conda &>/dev/null; then
     CONDA_BASE=$(conda info --base)
 elif [ -d "$HOME/miniconda3" ]; then
@@ -98,24 +223,14 @@ fi
 source "${CONDA_BASE}/etc/profile.d/conda.sh"
 conda activate "${CONDA_ENV_NAME}"
 
-# ---- Pre-flight checks ----
-if [ ! -f "${SCRIPT_DIR}/${CASCADE_CHECKPOINT}" ]; then
-    echo "ERROR: Cascade checkpoint not found: ${SCRIPT_DIR}/${CASCADE_CHECKPOINT}"
-    exit 1
-fi
-
-TRAIN_PARQUET_COUNT=$(find "${SCRIPT_DIR}/${DATA_DIR}" -maxdepth 1 -name "*.parquet" 2>/dev/null | wc -l | tr -d ' ')
-VAL_PARQUET_COUNT=$(find "${SCRIPT_DIR}/${VAL_DATA_DIR}" -maxdepth 1 -name "*.parquet" 2>/dev/null | wc -l | tr -d ' ')
-if [ "$TRAIN_PARQUET_COUNT" -lt 10 ] || [ "$VAL_PARQUET_COUNT" -lt 10 ]; then
-    echo "WARNING: Found ${TRAIN_PARQUET_COUNT} train and ${VAL_PARQUET_COUNT} val parquet files."
-fi
-
 # ---- Banner ----
+NUM_K_VALUES=$(echo "${TOP_K2_VALUES}" | wc -w | tr -d ' ')
 echo "================================================================"
 echo "  CoupleReranker top_k2 sweep"
 echo "================================================================"
 echo "Sweep root:            ${SWEEP_ROOT}"
-echo "K values:              ${TOP_K2_VALUES}"
+echo "Started:               $(date '+%Y-%m-%d %H:%M:%S')"
+echo "K values:              ${TOP_K2_VALUES} (${NUM_K_VALUES} total)"
 echo "K_couples (per run):   ${K_VALUES_COUPLES}"
 echo "K_tracks (per run):    ${K_VALUES_TRACKS}"
 echo "Epochs (per run):      ${EPOCHS}"
@@ -141,7 +256,7 @@ for K in ${TOP_K2_VALUES}; do
     SUBRUN_LOG="${SUBRUN_DIR}/training.log"
 
     echo "----------------------------------------------------------------"
-    echo "  [Run ${NUM_TOTAL}/$(echo "${TOP_K2_VALUES}" | wc -w | tr -d ' ')]  top_k2=${K}"
+    echo "  [Run ${NUM_TOTAL}/${NUM_K_VALUES}]  top_k2=${K}"
     echo "  Started:  $(date '+%Y-%m-%d %H:%M:%S')"
     echo "  Subrun:   ${SUBRUN_DIR}"
     echo "----------------------------------------------------------------"
@@ -194,6 +309,7 @@ done
 # ---- Final aggregation ----
 echo "================================================================"
 echo "  Sweep complete: ${NUM_OK} OK, ${NUM_FAILED} failed, ${NUM_TOTAL} total"
+echo "  Finished:       $(date '+%Y-%m-%d %H:%M:%S')"
 echo "================================================================"
 if [ -n "${FAILED_K_VALUES}" ]; then
     echo "Failed K values:${FAILED_K_VALUES}"

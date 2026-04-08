@@ -489,6 +489,187 @@ class MetricsAccumulator:
         return metrics
 
 
+class CoupleMetricsAccumulator:
+    """Accumulates three complementary per-event metrics across batches.
+
+    The naming convention uses an explicit unit suffix on every K so that
+    track-K and couple-K can never be confused:
+
+    **D@K_tracks** (Duplet at K tracks): per event, at least 2 of the 3 GT
+    pions are in the top-K tracks of the cascade's Stage 2 (ParT) score
+    ordering. K refers to a number of *tracks*. This is a fixed property
+    of the frozen cascade — every reranker run sees the same number for
+    the same checkpoint and dataset.
+
+        D@K_tracks = mean over events of:
+                       1[ n_gt(top-K_tracks) >= 2 ]
+
+    **C@K_couples** (Couple-found at K couples): per event, at least one
+    GT couple is in the top-K of the model's couple ranking. K refers to
+    a number of *couples*. This is the primary metric the reranker
+    optimizes. Multiple GT couples in the same event do NOT inflate the
+    metric: each event contributes 0 or 1.
+
+        C@K_couples = mean over eligible events of:
+                        1[ any GT couple in top-K_couples of reranker ]
+
+    **RC@K_couples** (Reconstructable at K couples): the joint condition
+    that we both found a couple AND have the full triplet available
+    downstream:
+
+        RC@K_couples = mean over eligible events of:
+                         1[ any GT couple in top-K_couples ]
+                       × 1[ n_gt_in_top_k1 == 3 ]
+
+    The Stage 1 condition (full triplet in top-K1) is the prerequisite
+    for a future triplet-completion stage. The gap
+    ``C@K_couples − RC@K_couples`` is the events where the couple was
+    found but the third pion was filtered by Stage 1.
+
+    C and RC share the same denominator: **events with at least one GT
+    couple in the per-event candidate pool**. So ``RC@K ≤ C@K`` always
+    holds. D has its own denominator: **all events** the accumulator
+    sees (since duplets can be measured even on events with no GT couple
+    in the candidate pool — the cascade output is independent of the
+    candidate pool restriction).
+
+    Usage:
+        accumulator = CoupleMetricsAccumulator(
+            k_values_couples=(50, 75, 100, 200),
+            k_values_tracks=(30, 50, 75, 100, 200),
+        )
+        for batch in val_loader:
+            accumulator.update(
+                couple_scores, couple_labels, couple_mask,
+                n_gt_in_top_k1=...,            # (B,) for RC@K_couples
+                n_gt_in_top_k_tracks=...,      # (B, K_tracks) for D@K_tracks
+            )
+        metrics = accumulator.compute()
+        # → {'d_at_30_tracks': ..., 'c_at_50_couples': ..., 'rc_at_50_couples': ..., ...}
+
+    Args:
+        k_values_couples: K values for C@K_couples and RC@K_couples.
+        k_values_tracks: K values for D@K_tracks.
+        full_triplet_threshold: GT-pion count that signals "full triplet"
+            (default 3, the τ → 3π case).
+        duplet_threshold: GT-pion count that signals "duplet found"
+            (default 2).
+    """
+
+    def __init__(
+        self,
+        k_values_couples: tuple[int, ...] = (50, 75, 100, 200),
+        k_values_tracks: tuple[int, ...] = (30, 50, 75, 100, 200),
+        full_triplet_threshold: int = 3,
+        duplet_threshold: int = 2,
+    ):
+        self.k_values_couples = k_values_couples
+        self.k_values_tracks = k_values_tracks
+        self.full_triplet_threshold = full_triplet_threshold
+        self.duplet_threshold = duplet_threshold
+        # C / RC accumulators (denominator = eligible events)
+        self.c_sums: dict[int, float] = {k: 0.0 for k in k_values_couples}
+        self.rc_sums: dict[int, float] = {k: 0.0 for k in k_values_couples}
+        self.eligible_events_count: int = 0
+        self.events_with_full_triplet_count: int = 0
+        # D accumulator (denominator = all events seen)
+        self.d_sums: dict[int, float] = {k: 0.0 for k in k_values_tracks}
+        self.total_events_count: int = 0
+
+    @torch.no_grad()
+    def update(
+        self,
+        couple_scores: torch.Tensor,
+        couple_labels: torch.Tensor,
+        couple_mask: torch.Tensor,
+        n_gt_in_top_k1: torch.Tensor | None = None,
+        n_gt_in_top_k_tracks: torch.Tensor | None = None,
+    ) -> None:
+        """Accumulate D@K_tracks, C@K_couples, RC@K_couples from one batch.
+
+        Args:
+            couple_scores: ``(B, n_couples)`` per-couple scores.
+            couple_labels: ``(B, n_couples)`` 0/1 GT-couple labels.
+            couple_mask: ``(B, n_couples)`` validity mask (Filter A).
+            n_gt_in_top_k1: ``(B,)`` per-event GT-pion count in Stage 1
+                top-K1. Required for RC@K_couples.
+            n_gt_in_top_k_tracks: ``(B, len(k_values_tracks))`` per-event
+                GT-pion counts in the top-K tracks for each K in
+                ``k_values_tracks``. Required for D@K_tracks.
+        """
+        batch_size = couple_scores.shape[0]
+
+        # ---- D@K_tracks accumulation (denominator = all events) ----
+        if n_gt_in_top_k_tracks is not None:
+            for batch_index in range(batch_size):
+                self.total_events_count += 1
+                for k_index, k in enumerate(self.k_values_tracks):
+                    n_gt_at_k = n_gt_in_top_k_tracks[batch_index, k_index].item()
+                    if n_gt_at_k >= self.duplet_threshold:
+                        self.d_sums[k] += 1.0
+        else:
+            self.total_events_count += batch_size
+
+        # ---- C@K_couples / RC@K_couples accumulation ----
+        for batch_index in range(batch_size):
+            valid_mask = couple_mask[batch_index] > 0.5
+            if not valid_mask.any():
+                continue
+            gt_mask = (couple_labels[batch_index] > 0.5) & valid_mask
+            if not gt_mask.any():
+                continue
+
+            # Push invalid couples to -inf so they sort to the bottom
+            event_scores = couple_scores[batch_index].clone()
+            event_scores = event_scores.masked_fill(
+                ~valid_mask, float('-inf'),
+            )
+            sorted_indices = torch.argsort(event_scores, descending=True)
+            sorted_gt = gt_mask[sorted_indices]
+
+            self.eligible_events_count += 1
+
+            full_triplet_present = False
+            if n_gt_in_top_k1 is not None:
+                full_triplet_present = bool(
+                    n_gt_in_top_k1[batch_index].item()
+                    >= self.full_triplet_threshold
+                )
+                if full_triplet_present:
+                    self.events_with_full_triplet_count += 1
+
+            for k in self.k_values_couples:
+                couple_in_top_k = bool(sorted_gt[:k].any().item())
+                if couple_in_top_k:
+                    self.c_sums[k] += 1.0
+                    if full_triplet_present:
+                        self.rc_sums[k] += 1.0
+
+    def compute(self) -> dict[str, float]:
+        """Compute final averages.
+
+        Returns a dict with:
+            ``d_at_K_tracks`` for each K in ``k_values_tracks``
+                (denominator: all events seen)
+            ``c_at_K_couples``, ``rc_at_K_couples`` for each K in
+                ``k_values_couples`` (denominator: eligible events)
+            bookkeeping: ``eligible_events``, ``total_events``,
+                ``events_with_full_triplet``
+        """
+        eligible = max(1, self.eligible_events_count)
+        total = max(1, self.total_events_count)
+        metrics: dict[str, float] = {}
+        for k in self.k_values_tracks:
+            metrics[f'd_at_{k}_tracks'] = self.d_sums[k] / total
+        for k in self.k_values_couples:
+            metrics[f'c_at_{k}_couples'] = self.c_sums[k] / eligible
+            metrics[f'rc_at_{k}_couples'] = self.rc_sums[k] / eligible
+        metrics['eligible_events'] = self.eligible_events_count
+        metrics['total_events'] = self.total_events_count
+        metrics['events_with_full_triplet'] = self.events_with_full_triplet_count
+        return metrics
+
+
 @torch.no_grad()
 def compute_conditional_recall(
     per_track_scores: torch.Tensor,

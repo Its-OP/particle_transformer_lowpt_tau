@@ -10,7 +10,7 @@ Usage:
         --stage1-checkpoint models/prefilter_best.pt \\
         --data-config data/low-pt/lowpt_tau_trackfinder.yaml \\
         --data-dir data/low-pt/subset/val/ \\
-        --output reports/triplet_combinatorics.md \\
+        --output reports/triplet_reranking/triplet_combinatorics.md \\
         --device mps --max-events 150
 """
 
@@ -339,7 +339,7 @@ def main():
     parser.add_argument('--stage1-checkpoint', type=str, required=True)
     parser.add_argument('--data-config', type=str, required=True)
     parser.add_argument('--data-dir', type=str, required=True)
-    parser.add_argument('--output', type=str, default='reports/triplet_combinatorics.md')
+    parser.add_argument('--output', type=str, default='reports/triplet_reranking/triplet_combinatorics.md')
     parser.add_argument('--device', type=str, default='mps')
     parser.add_argument('--batch-size', type=int, default=4)
     parser.add_argument('--max-events', type=int, default=150)

@@ -65,6 +65,34 @@ from utils.training_utils import (
 logger = logging.getLogger('train_cascade')
 
 
+# ---------------------------------------------------------------------------
+# Metric labels for the on-disk loss_history.json
+# ---------------------------------------------------------------------------
+#
+# Maps loss-history dict keys to short human-readable descriptions. The
+# saver wraps each metric as ``{'label': str, 'values': list[float]}`` so
+# the JSON file is self-documenting.
+
+METRIC_LABELS: dict[str, str] = {
+    'train': 'Train loss (per-track ranking, mean per epoch)',
+    'val': 'Validation loss (per-track ranking)',
+    'lr': 'Learning rate',
+    'd_prime': "Cohen's d' between GT and background score distributions (val)",
+    'median_gt_rank': 'Median rank of GT pions in the per-event score order (val)',
+    'stage1_recall_at_k1': 'Stage 1 recall at K1=top_k1 — fraction of GT pions surviving the prefilter (val)',
+}
+for _k in (10, 20, 30, 50, 100, 200, 300, 400, 500, 600, 800):
+    METRIC_LABELS[f'recall_at_{_k}'] = (
+        f'R@{_k}: per-event recall at top-{_k} tracks '
+        f'(fraction of GT pions in the model top-{_k}, val-averaged)'
+    )
+    METRIC_LABELS[f'perfect_at_{_k}'] = (
+        f'P@{_k}: per-event perfect recall at top-{_k} tracks '
+        f'(fraction of events with all 3 GT pions in top-{_k}, val-averaged)'
+    )
+del _k
+
+
 def train_one_epoch(
     model: torch.nn.Module,
     train_loader: DataLoader,
@@ -979,7 +1007,9 @@ def main():
                     if history_key not in loss_history:
                         loss_history[history_key] = []
                     loss_history[history_key].append(metric_value)
-            save_loss_history(loss_history, experiment_dir)
+            save_loss_history(
+                loss_history, experiment_dir, metric_labels=METRIC_LABELS,
+            )
 
             # Per-epoch metrics JSON
             epoch_metrics = {

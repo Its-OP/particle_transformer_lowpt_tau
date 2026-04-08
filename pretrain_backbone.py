@@ -612,23 +612,69 @@ def validate(
     return total_loss / max(1, num_batches)
 
 
-def save_loss_history(loss_history: dict, experiment_dir: str):
+def _extract_metric_values(entry):
+    """Extract the value list from a loss-history entry.
+
+    Supports two on-disk formats:
+        - **New (preferred):** ``{'label': str, 'values': list[float]}``
+          — every metric carries a human-readable label so the JSON
+          file is self-documenting.
+        - **Legacy:** plain ``list[float]`` — the pre-2026-04 flat
+          format used by `train_cascade.py` and `train_prefilter.py`
+          before the labels rework. Still readable so older
+          experiment dumps don't break.
+    """
+    if isinstance(entry, dict) and 'values' in entry:
+        return entry['values']
+    return entry
+
+
+def save_loss_history(
+    loss_history: dict,
+    experiment_dir: str,
+    metric_labels: dict[str, str] | None = None,
+):
     """Save loss history to JSON for later plotting.
 
+    The on-disk format is the labeled-metric layout: each metric key
+    maps to ``{'label': str, 'values': list[float]}``. The label is a
+    short human-readable description so the JSON file is
+    self-documenting (the user reads it manually). If no label is
+    provided for a key, the key itself is used as the label fallback.
+
     Args:
-        loss_history: Dict with 'train' and 'val' lists of per-epoch losses.
+        loss_history: Dict mapping metric key → ``list[float]``
+            (per-epoch values). Can also be the new on-disk format
+            already (``dict`` entries with ``label`` / ``values``),
+            in which case the entries are passed through.
         experiment_dir: Experiment root directory for the JSON file.
+        metric_labels: Optional dict mapping metric key → label string.
+            Keys missing from this dict default to ``label = key``.
     """
+    metric_labels = metric_labels or {}
+    output: dict[str, dict] = {}
+    for key, entry in loss_history.items():
+        if isinstance(entry, dict) and 'values' in entry:
+            label = entry.get('label', metric_labels.get(key, key))
+            values = entry['values']
+        else:
+            label = metric_labels.get(key, key)
+            values = entry
+        output[key] = {'label': label, 'values': values}
     output_path = os.path.join(experiment_dir, 'loss_history.json')
     with open(output_path, 'w') as file:
-        json.dump(loss_history, file, indent=2)
+        json.dump(output, file, indent=2)
 
 
 def plot_loss_curves(loss_history: dict, experiment_dir: str):
     """Generate and save loss curve plots to the experiment root.
 
+    Reads the in-memory ``loss_history`` dict, which can be either the
+    legacy flat layout or the new labeled-metric layout — each metric
+    is unpacked via ``_extract_metric_values``.
+
     Args:
-        loss_history: Dict with 'train', 'val', and 'lr' lists.
+        loss_history: Dict with 'train', 'val', and 'lr' entries.
         experiment_dir: Experiment root directory for the plot.
     """
     try:
@@ -636,13 +682,17 @@ def plot_loss_curves(loss_history: dict, experiment_dir: str):
         matplotlib.use('Agg')
         import matplotlib.pyplot as plt
 
+        train_values = _extract_metric_values(loss_history['train'])
+        val_values = _extract_metric_values(loss_history['val'])
+        lr_values = _extract_metric_values(loss_history['lr'])
+
         fig, (axis_loss, axis_lr) = plt.subplots(1, 2, figsize=(14, 5))
 
-        epochs = range(1, len(loss_history['train']) + 1)
+        epochs = range(1, len(train_values) + 1)
 
         # Loss curves
-        axis_loss.plot(epochs, loss_history['train'], 'b-', label='Train')
-        axis_loss.plot(epochs, loss_history['val'], 'r-', label='Validation')
+        axis_loss.plot(epochs, train_values, 'b-', label='Train')
+        axis_loss.plot(epochs, val_values, 'r-', label='Validation')
         axis_loss.set_xlabel('Epoch')
         axis_loss.set_ylabel('Loss')
         axis_loss.set_title('Reconstruction Loss')
@@ -650,7 +700,7 @@ def plot_loss_curves(loss_history: dict, experiment_dir: str):
         axis_loss.grid(True, alpha=0.3)
 
         # Learning rate
-        axis_lr.plot(epochs, loss_history['lr'], 'g-')
+        axis_lr.plot(epochs, lr_values, 'g-')
         axis_lr.set_xlabel('Epoch')
         axis_lr.set_ylabel('Learning Rate')
         axis_lr.set_title('Learning Rate Schedule')

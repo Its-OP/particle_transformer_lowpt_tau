@@ -58,6 +58,7 @@ from utils.training_utils import (
     CheckpointManager,
     CoupleMetricsAccumulator,
     extract_label_from_inputs,
+    format_couple_metrics_table,
     load_network_module,
     save_epoch_metrics,
     trim_to_max_valid_tracks,
@@ -578,46 +579,21 @@ def main():
                 best_val_c_at_100 = val_c_at_100
                 best_val_epoch = epoch
 
-            def _format_metrics(metrics: dict) -> str:
-                parts = [
-                    f'D@{k}t: {metrics.get(f"d_at_{k}_tracks", 0.0):.4f}'
-                    for k in (30, 50, 75, 100, 200)
-                ]
-                parts += [
-                    f'C@{k}c: {metrics.get(f"c_at_{k}_couples", 0.0):.4f}'
-                    for k in (50, 75, 100, 200)
-                ]
-                parts += [
-                    f'RC@{k}c: {metrics.get(f"rc_at_{k}_couples", 0.0):.4f}'
-                    for k in (50, 75, 100, 200)
-                ]
-                if 'mean_first_gt_rank_couples' in metrics:
-                    parts.append(
-                        f'mean_rank: {metrics["mean_first_gt_rank_couples"]:.1f}',
-                    )
-                if 'eligible_events' in metrics:
-                    parts.append(
-                        f'eligible: {int(metrics["eligible_events"])}',
-                    )
-                if 'events_with_full_triplet' in metrics:
-                    parts.append(
-                        f'full_triplet: {int(metrics["events_with_full_triplet"])}',
-                    )
-                return ' | '.join(parts)
-
-            val_summary = _format_metrics(val_metrics)
-            if is_best:
-                logger.info(
-                    f'Epoch {epoch} val | total: {val_loss:.5f} '
-                    f'C@100c: {val_c_at_100:.4f} ★ new best | {val_summary}',
-                )
-            else:
-                epochs_since_best = epoch - best_val_epoch
-                logger.info(
-                    f'Epoch {epoch} val | total: {val_loss:.5f} '
-                    f'(best C@100c: {best_val_c_at_100:.4f}, '
-                    f'{epochs_since_best} epochs ago) | {val_summary}',
-                )
+            # Render the validation summary as a multi-line ASCII table
+            # (header line + K × {D, C, RC} table + footer with mean rank
+            # and bookkeeping). The leading newline keeps the table body
+            # vertically aligned beneath the logger's timestamped header.
+            val_table = format_couple_metrics_table(
+                val_metrics,
+                train_loss=train_losses['total_loss'],
+                val_loss=val_loss,
+                epoch=epoch,
+                is_best=is_best,
+                best_val_criterion=best_val_c_at_100,
+                best_val_epoch=best_val_epoch,
+                criterion_name='C@100c',
+            )
+            logger.info('\n' + val_table)
 
             scheduler.step_epoch(val_loss)
             current_lr = scheduler.get_last_lr()[0]

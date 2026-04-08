@@ -4,7 +4,10 @@ from __future__ import annotations
 import pytest
 import torch
 
-from utils.training_utils import CoupleMetricsAccumulator
+from utils.training_utils import (
+    CoupleMetricsAccumulator,
+    format_couple_metrics_table,
+)
 
 
 def _accumulator(
@@ -587,3 +590,196 @@ class TestDenominatorInvariant:
         assert metrics['eligible_events'] == 1
         # Mean rank averages over the 1 eligible event, not 2
         assert metrics['mean_first_gt_rank_couples'] == 1.0
+
+
+# ---------------------------------------------------------------------------
+# Validation log table formatter
+# ---------------------------------------------------------------------------
+
+def _example_metrics() -> dict:
+    """Realistic val_metrics dict matching one epoch of the actual log."""
+    return {
+        'd_at_30_tracks': 0.8145,
+        'd_at_50_tracks': 0.8500,
+        'd_at_75_tracks': 0.8845,
+        'd_at_100_tracks': 0.9050,
+        'd_at_200_tracks': 0.9555,
+        'c_at_50_couples': 0.9341,
+        'c_at_75_couples': 0.9606,
+        'c_at_100_couples': 0.9753,
+        'c_at_200_couples': 0.9935,
+        'rc_at_50_couples': 0.8982,
+        'rc_at_75_couples': 0.9217,
+        'rc_at_100_couples': 0.9353,
+        'rc_at_200_couples': 0.9511,
+        'mean_first_gt_rank_couples': 12.3,
+        'eligible_events': 1699,
+        'total_events': 1700,
+        'events_with_full_triplet': 1625,
+    }
+
+
+class TestFormatCoupleMetricsTable:
+    def test_returns_multiline_string(self):
+        table = format_couple_metrics_table(
+            _example_metrics(),
+            train_loss=0.08874,
+            val_loss=0.08194,
+            epoch=22,
+            is_best=True,
+            best_val_criterion=0.9753,
+            best_val_epoch=22,
+        )
+        assert isinstance(table, str)
+        assert table.count('\n') >= 5  # header + table body + footer
+
+    def test_header_contains_train_and_val_loss(self):
+        table = format_couple_metrics_table(
+            _example_metrics(),
+            train_loss=0.08874,
+            val_loss=0.08194,
+            epoch=22,
+            is_best=True,
+            best_val_criterion=0.9753,
+            best_val_epoch=22,
+        )
+        assert '0.08874' in table  # train loss
+        assert '0.08194' in table  # val loss
+        assert 'Epoch 22' in table
+
+    def test_best_marker_when_is_best(self):
+        table = format_couple_metrics_table(
+            _example_metrics(),
+            train_loss=0.08874,
+            val_loss=0.08194,
+            epoch=22,
+            is_best=True,
+            best_val_criterion=0.9753,
+            best_val_epoch=22,
+        )
+        assert 'best' in table.lower()
+        assert '0.9753' in table  # best criterion value
+
+    def test_non_best_shows_epochs_since_best(self):
+        table = format_couple_metrics_table(
+            _example_metrics(),
+            train_loss=0.08874,
+            val_loss=0.08194,
+            epoch=25,
+            is_best=False,
+            best_val_criterion=0.9753,
+            best_val_epoch=22,
+        )
+        # 25 - 22 = 3 epochs ago
+        assert '3' in table
+        assert 'best' in table.lower()
+
+    def test_table_includes_union_of_k_values(self):
+        """K=30 only has D; K=50/75/100/200 have all three. The K
+        column must include 30 even though C and RC are missing."""
+        table = format_couple_metrics_table(
+            _example_metrics(),
+            train_loss=0.08874,
+            val_loss=0.08194,
+            epoch=22,
+            is_best=True,
+            best_val_criterion=0.9753,
+            best_val_epoch=22,
+        )
+        for k in (30, 50, 75, 100, 200):
+            assert str(k) in table, f'K={k} missing from table'
+
+    def test_missing_metric_renders_as_dash(self):
+        """K=30 has no C/RC value — those cells must render as a
+        dash, not as 0.0000 (which would be a wrong claim)."""
+        metrics = _example_metrics()
+        # Make sure K=30 has only D
+        assert 'c_at_30_couples' not in metrics
+        assert 'rc_at_30_couples' not in metrics
+        table = format_couple_metrics_table(
+            metrics,
+            train_loss=0.08874,
+            val_loss=0.08194,
+            epoch=22,
+            is_best=True,
+            best_val_criterion=0.9753,
+            best_val_epoch=22,
+        )
+        # Find the row for K=30
+        line_for_30 = next(
+            (line for line in table.split('\n') if line.lstrip().startswith('|') and ' 30 ' in line),
+            None,
+        )
+        assert line_for_30 is not None
+        assert '-' in line_for_30  # placeholder for missing C/RC
+
+    def test_all_d_c_rc_values_appear_in_table(self):
+        metrics = _example_metrics()
+        table = format_couple_metrics_table(
+            metrics,
+            train_loss=0.08874,
+            val_loss=0.08194,
+            epoch=22,
+            is_best=True,
+            best_val_criterion=0.9753,
+            best_val_epoch=22,
+        )
+        for value_text in (
+            '0.8145', '0.8500', '0.8845', '0.9050', '0.9555',  # D
+            '0.9341', '0.9606', '0.9753', '0.9935',            # C
+            '0.8982', '0.9217', '0.9353', '0.9511',            # RC
+        ):
+            assert value_text in table, f'value {value_text} missing'
+
+    def test_footer_contains_mean_rank_eligible_full_triplet(self):
+        table = format_couple_metrics_table(
+            _example_metrics(),
+            train_loss=0.08874,
+            val_loss=0.08194,
+            epoch=22,
+            is_best=True,
+            best_val_criterion=0.9753,
+            best_val_epoch=22,
+        )
+        assert '12.3' in table              # mean rank
+        assert '1699' in table              # eligible
+        assert '1700' in table              # total
+        assert '1625' in table              # full triplet
+
+    def test_table_has_column_headers(self):
+        table = format_couple_metrics_table(
+            _example_metrics(),
+            train_loss=0.08874,
+            val_loss=0.08194,
+            epoch=22,
+            is_best=True,
+            best_val_criterion=0.9753,
+            best_val_epoch=22,
+        )
+        assert 'D@K_tracks' in table
+        assert 'C@K_couples' in table
+        assert 'RC@K_couples' in table
+
+    def test_zero_total_events_does_not_crash(self):
+        empty = {
+            'd_at_50_tracks': 0.0,
+            'c_at_50_couples': 0.0,
+            'rc_at_50_couples': 0.0,
+            'mean_first_gt_rank_couples': 0.0,
+            'eligible_events': 0,
+            'total_events': 0,
+            'events_with_full_triplet': 0,
+        }
+        # Must not raise
+        table = format_couple_metrics_table(
+            empty,
+            train_loss=0.0,
+            val_loss=0.0,
+            epoch=1,
+            is_best=False,
+            best_val_criterion=0.0,
+            best_val_epoch=0,
+            k_values_tracks=(50,),
+            k_values_couples=(50,),
+        )
+        assert isinstance(table, str)

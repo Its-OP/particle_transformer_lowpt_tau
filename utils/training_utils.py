@@ -716,6 +716,108 @@ class CoupleMetricsAccumulator:
         return metrics
 
 
+def format_couple_metrics_table(
+    val_metrics: dict,
+    *,
+    train_loss: float,
+    val_loss: float,
+    epoch: int,
+    is_best: bool,
+    best_val_criterion: float,
+    best_val_epoch: int,
+    criterion_name: str = 'C@100c',
+    k_values_tracks: tuple = (30, 50, 75, 100, 200),
+    k_values_couples: tuple = (50, 75, 100, 200),
+) -> str:
+    """Render one validation epoch as a multi-line ASCII table.
+
+    The output has three sections:
+
+    1. **Header line** — epoch number, train + val losses, best-marker
+       (★ on best epoch, "(N epochs ago)" otherwise).
+    2. **K × {D, C, RC} table** — rows are the union of ``k_values_tracks``
+       and ``k_values_couples``; cells with no value (e.g., C@30 since
+       there is no K=30 in ``k_values_couples``) render as ``-``.
+    3. **Footer** — mean rank of best GT couple, eligible/total event
+       counts, full-triplet bookkeeping count.
+
+    The function is pure: no logging, no I/O. Pass the result to
+    ``logger.info`` (the multi-line string is rendered with the standard
+    log prefix on the first line and unprefixed continuation lines).
+
+    Args:
+        val_metrics: Dict from ``CoupleMetricsAccumulator.compute()``.
+        train_loss: Train loss for the same epoch (mean over batches).
+        val_loss: Validation loss for the epoch.
+        epoch: Current epoch number.
+        is_best: Whether ``val_metrics[criterion_name]`` is a new best.
+        best_val_criterion: Best criterion value seen so far.
+        best_val_epoch: Epoch at which ``best_val_criterion`` was set.
+        criterion_name: Display name for the selection metric (default
+            ``C@100c``).
+        k_values_tracks: K values reported for D@K_tracks.
+        k_values_couples: K values reported for C@K_couples and
+            RC@K_couples.
+
+    Returns:
+        Multi-line string ready for ``logger.info``.
+    """
+    # ---- Header line ----
+    if is_best:
+        header = (
+            f'Epoch {epoch} | train: {train_loss:.5f} | val: {val_loss:.5f} '
+            f'| ★ new best ({criterion_name}={best_val_criterion:.4f})'
+        )
+    else:
+        epochs_since = epoch - best_val_epoch
+        header = (
+            f'Epoch {epoch} | train: {train_loss:.5f} | val: {val_loss:.5f} '
+            f'| best {criterion_name}={best_val_criterion:.4f} '
+            f'({epochs_since} epochs ago)'
+        )
+
+    # ---- K × {D, C, RC} table ----
+    all_k_values = sorted(set(k_values_tracks) | set(k_values_couples))
+    column_headers = ('K', 'D@K_tracks', 'C@K_couples', 'RC@K_couples')
+    # Inner widths chosen to be wider than the longest header text in each
+    # column, with at least one space of horizontal padding on each side.
+    column_widths = (5, 12, 13, 14)
+
+    def _format_row(values: tuple) -> str:
+        cells = [
+            str(value).center(width)
+            for value, width in zip(values, column_widths, strict=True)
+        ]
+        return '|' + '|'.join(cells) + '|'
+
+    def _separator() -> str:
+        return '+' + '+'.join('-' * width for width in column_widths) + '+'
+
+    table_lines = [_separator(), _format_row(column_headers), _separator()]
+    for k in all_k_values:
+        d_value = val_metrics.get(f'd_at_{k}_tracks')
+        c_value = val_metrics.get(f'c_at_{k}_couples')
+        rc_value = val_metrics.get(f'rc_at_{k}_couples')
+        d_text = f'{d_value:.4f}' if d_value is not None else '-'
+        c_text = f'{c_value:.4f}' if c_value is not None else '-'
+        rc_text = f'{rc_value:.4f}' if rc_value is not None else '-'
+        table_lines.append(_format_row((str(k), d_text, c_text, rc_text)))
+    table_lines.append(_separator())
+
+    # ---- Footer ----
+    mean_rank = val_metrics.get('mean_first_gt_rank_couples', 0.0)
+    eligible_events = int(val_metrics.get('eligible_events', 0))
+    total_events = int(val_metrics.get('total_events', 0))
+    full_triplet_events = int(val_metrics.get('events_with_full_triplet', 0))
+    footer = (
+        f'mean_rank: {mean_rank:.1f} | '
+        f'eligible: {eligible_events} / {total_events} | '
+        f'full_triplet: {full_triplet_events}'
+    )
+
+    return '\n'.join([header, *table_lines, footer])
+
+
 @torch.no_grad()
 def compute_conditional_recall(
     per_track_scores: torch.Tensor,

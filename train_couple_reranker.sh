@@ -44,7 +44,12 @@ SESSION_GPU="couple_gpu"
 CONDA_ENV_NAME="part"
 
 # ---- The cascade checkpoint (frozen Stage 1 + Stage 2) ----
-CASCADE_CHECKPOINT="models/debug_checkpoints/cascade_soap_Cascade_20260406_202001/checkpoints/best_model.pt"
+# Persistent path that lives next to models/prefilter_best.pt — survives the
+# .gitignore on debug_checkpoints/. The actual contents come from the
+# `cascade_soap_Cascade_20260406_202001` epoch-55 best checkpoint and contain
+# both stage1 (32 keys, dim256 cutoff prefilter) and stage2 (84 keys, ParT)
+# weights — no separate prefilter checkpoint is needed.
+CASCADE_CHECKPOINT="models/cascade_best.pt"
 
 # =============================================================================
 # Primary tunables (override via env vars OR by passing the matching CLI flag

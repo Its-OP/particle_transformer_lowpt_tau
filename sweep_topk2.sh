@@ -73,13 +73,13 @@ COUPLE_HIDDEN_DIM="${COUPLE_HIDDEN_DIM:-256}"
 COUPLE_NUM_RESIDUAL_BLOCKS="${COUPLE_NUM_RESIDUAL_BLOCKS:-4}"
 COUPLE_DROPOUT="${COUPLE_DROPOUT:-0.1}"
 
-# ---- Static paths ----
-DATA_CONFIG="data/low-pt/lowpt_tau_trackfinder.yaml"
-DATA_DIR="data/low-pt/train/"
-VAL_DATA_DIR="data/low-pt/val/"
-NETWORK="networks/lowpt_tau_CoupleReranker.py"
-CASCADE_CHECKPOINT="models/cascade_best.pt"
-CONDA_ENV_NAME="part"
+# ---- Paths (overridable so smoke tests can point at the subset dataset) ----
+DATA_CONFIG="${DATA_CONFIG:-data/low-pt/lowpt_tau_trackfinder.yaml}"
+DATA_DIR="${DATA_DIR:-data/low-pt/train/}"
+VAL_DATA_DIR="${VAL_DATA_DIR:-data/low-pt/val/}"
+NETWORK="${NETWORK:-networks/lowpt_tau_CoupleReranker.py}"
+CASCADE_CHECKPOINT="${CASCADE_CHECKPOINT:-models/cascade_best.pt}"
+CONDA_ENV_NAME="${CONDA_ENV_NAME:-part}"
 
 # ---- Screen session names ----
 SESSION_SWEEP="topk2_sweep"

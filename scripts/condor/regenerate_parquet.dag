@@ -1,0 +1,16 @@
+# DAG: regenerate parquet dataset from source ROOT files.
+#
+# Step 1 (merge): Merge per-job ROOT files into one file per batch (10 parallel jobs).
+# Step 2 (convert): Convert merged ROOT files to sharded parquet (1 job, runs after all merges).
+#
+# Usage (from any directory on lxplus):
+#   mkdir -p ~/condor/dag_logs
+#   condor_submit_dag ~/condor/regenerate_parquet.dag
+
+NODE_STATUS_FILE /afs/cern.ch/user/o/oprostak/condor/dag_logs/regenerate_parquet.status
+DOT /afs/cern.ch/user/o/oprostak/condor/dag_logs/regenerate_parquet.dot
+
+JOB merge /afs/cern.ch/user/o/oprostak/condor/compress_source_root/merge_batches.sub DIR /afs/cern.ch/user/o/oprostak/condor/compress_source_root
+JOB convert /afs/cern.ch/user/o/oprostak/condor/convert_root_to_parquet/convert_to_parquet.sub DIR /afs/cern.ch/user/o/oprostak/condor/convert_root_to_parquet
+
+PARENT merge CHILD convert

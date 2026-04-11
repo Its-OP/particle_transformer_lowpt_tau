@@ -109,5 +109,8 @@ labels:
 
 observers:
    - event_n_tracks
+   - event_run
+   - event_id
+   - event_luminosity_block
 
 weights:

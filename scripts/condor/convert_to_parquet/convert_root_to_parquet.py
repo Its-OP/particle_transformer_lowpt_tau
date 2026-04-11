@@ -107,7 +107,9 @@ DEFAULT_COLUMNS = [
 ]
 
 # Event-level branches (scalars per event).
-EVENT_BRANCHES = ['PV_x', 'PV_y', 'PV_z']
+# PV_x/y/z: primary vertex coordinates (float).
+# run, event, luminosityBlock: CMS event identifiers for tracing back to ROOT source.
+EVENT_BRANCHES = ['PV_x', 'PV_y', 'PV_z', 'run', 'event', 'luminosityBlock']
 
 # Integer columns for type casting (int32 instead of float32).
 TRACK_INTEGER_COLUMNS = {
@@ -412,6 +414,12 @@ def build_output_table(track_features, event_info, pion_counts):
     output['event_primary_vertex_z'] = event_info['PV_z'].astype(np.float32)
     output['event_n_tracks'] = pion_counts.astype(np.int32)
 
+    # CMS event identifiers — for tracing events back to ROOT source.
+    # (run, luminosityBlock, event) is the standard CMS unique key.
+    output['event_run'] = event_info['run'].astype(np.int32)
+    output['event_id'] = event_info['event'].astype(np.int64)
+    output['event_luminosity_block'] = event_info['luminosityBlock'].astype(np.int32)
+
     # Track (pion) features and per-track label — jagged arrays
     output.update(track_features)
 
@@ -527,6 +535,21 @@ def validate_parquet_output(output_dir, pt_cutoff, required_gt_pions):
                 f'{n_bad} events have wrong count. '
                 f'Found: {bad_counts}, required: {required_gt_pions}'
             )
+
+        # Validate CMS event identifiers exist and have correct types
+        for id_col, expected_kind in [
+            ('event_run', 'i'), ('event_id', 'i'), ('event_luminosity_block', 'i'),
+        ]:
+            if id_col not in data.fields:
+                raise ValueError(
+                    f'Missing column {id_col} in {os.path.basename(filepath)}'
+                )
+            id_values = ak.to_numpy(data[id_col])
+            if id_values.dtype.kind != expected_kind:
+                raise ValueError(
+                    f'Wrong dtype for {id_col} in {os.path.basename(filepath)}: '
+                    f'{id_values.dtype} (expected integer)'
+                )
 
         print(f'    OK {os.path.basename(filepath)}: '
               f'{n_events} events, {n_tracks} tracks, min pT={min_pt:.4f}')

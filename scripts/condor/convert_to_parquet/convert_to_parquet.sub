@@ -4,6 +4,7 @@ output = logs/convert.$(ClusterId).out
 error  = logs/convert.$(ClusterId).err
 log    = logs/convert.$(ClusterId).log
 
+request_memory = 8000
 +JobFlavour = "workday"
 
 queue

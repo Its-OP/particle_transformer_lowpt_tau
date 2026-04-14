@@ -743,7 +743,7 @@ def main():
                 grad_clip_max_norm=args.grad_clip,
             )
 
-            eval_steps = max(1, steps_per_epoch // 4)
+            eval_steps = max(1, steps_per_epoch // 2)
 
             val_losses, val_metrics = validate(
                 model, val_loader, device, data_config,

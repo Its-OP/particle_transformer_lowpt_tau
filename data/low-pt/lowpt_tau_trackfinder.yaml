@@ -112,5 +112,7 @@ observers:
    - event_run
    - event_id
    - event_luminosity_block
+   - source_batch_id
+   - source_microbatch_id
 
 weights:

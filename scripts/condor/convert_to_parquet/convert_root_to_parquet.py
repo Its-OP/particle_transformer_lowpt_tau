@@ -109,7 +109,16 @@ DEFAULT_COLUMNS = [
 # Event-level branches (scalars per event).
 # PV_x/y/z: primary vertex coordinates (float).
 # run, event, luminosityBlock: CMS event identifiers for tracing back to ROOT source.
-EVENT_BRANCHES = ['PV_x', 'PV_y', 'PV_z', 'run', 'event', 'luminosityBlock']
+# source_batch_id, source_microbatch_id: added during merge_batches to uniquely
+#   identify the tau candidate together with (run, event, luminosityBlock).
+# source_batch_id, source_microbatch_id: added during merge_batches to
+#   disambiguate tau candidates — (run, event, luminosityBlock) is NOT unique
+#   because the same CMS event appears in multiple microbatch files.
+EVENT_BRANCHES = [
+    'PV_x', 'PV_y', 'PV_z',
+    'run', 'event', 'luminosityBlock',
+    'source_batch_id', 'source_microbatch_id',
+]
 
 # Integer columns for type casting (int32 instead of float32).
 TRACK_INTEGER_COLUMNS = {
@@ -289,13 +298,24 @@ def read_event_info(tree, clean_event_mask, entry_start=None, entry_stop=None):
     Returns:
         A dict mapping branch names to numpy arrays (one value per clean event).
     """
+    available = set(tree.keys())
+    branches_to_read = [b for b in EVENT_BRANCHES if b in available]
     event_data = tree.arrays(
-        expressions=EVENT_BRANCHES,
+        expressions=branches_to_read,
         entry_start=entry_start,
         entry_stop=entry_stop,
     )
 
-    return {branch: ak.to_numpy(event_data[branch])[clean_event_mask] for branch in EVENT_BRANCHES}
+    result = {}
+    n_clean = int(clean_event_mask.sum())
+    for branch in EVENT_BRANCHES:
+        if branch in available:
+            result[branch] = ak.to_numpy(event_data[branch])[clean_event_mask]
+        else:
+            # Fill missing source ID branches with -1 (old .root files
+            # produced before merge_batches added these columns).
+            result[branch] = np.full(n_clean, -1, dtype=np.int32)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -415,10 +435,15 @@ def build_output_table(track_features, event_info, pion_counts):
     output['event_n_tracks'] = pion_counts.astype(np.int32)
 
     # CMS event identifiers — for tracing events back to ROOT source.
-    # (run, luminosityBlock, event) is the standard CMS unique key.
+    # (run, luminosityBlock, event) is NOT unique per row because the
+    # upstream CMSSW analysis writes one entry per tau candidate.
+    # source_batch_id + source_microbatch_id (added during merge_batches)
+    # disambiguate candidates within the same CMS event.
     output['event_run'] = event_info['run'].astype(np.int32)
     output['event_id'] = event_info['event'].astype(np.int64)
     output['event_luminosity_block'] = event_info['luminosityBlock'].astype(np.int32)
+    output['source_batch_id'] = event_info['source_batch_id'].astype(np.int32)
+    output['source_microbatch_id'] = event_info['source_microbatch_id'].astype(np.int32)
 
     # Track (pion) features and per-track label — jagged arrays
     output.update(track_features)
@@ -536,9 +561,10 @@ def validate_parquet_output(output_dir, pt_cutoff, required_gt_pions):
                 f'Found: {bad_counts}, required: {required_gt_pions}'
             )
 
-        # Validate CMS event identifiers exist and have correct types
+        # Validate CMS event identifiers and source IDs exist with correct types
         for id_col, expected_kind in [
             ('event_run', 'i'), ('event_id', 'i'), ('event_luminosity_block', 'i'),
+            ('source_batch_id', 'i'), ('source_microbatch_id', 'i'),
         ]:
             if id_col not in data.fields:
                 raise ValueError(

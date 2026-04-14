@@ -153,6 +153,7 @@ def train_one_epoch(
     model.train()
     loss_accumulators: dict[str, torch.Tensor] | None = None
     num_batches = 0
+    non_finite_batches = 0
     start_time = time.time()
 
     for batch_index, (X, _, _) in enumerate(train_loader):
@@ -190,9 +191,11 @@ def train_one_epoch(
         loss = loss_dict['total_loss']
 
         if not torch.isfinite(loss).item():
+            non_finite_batches += 1
             logger.warning(
                 f'Epoch {epoch} | Batch {batch_index} | '
-                f'Skipping batch with non-finite loss',
+                f'Skipping batch with non-finite loss '
+                f'(total non-finite: {non_finite_batches})',
             )
             optimizer.zero_grad(set_to_none=True)
             global_batch_count += 1
@@ -235,10 +238,105 @@ def train_one_epoch(
         key: value.item() / max(1, num_batches)
         for key, value in loss_accumulators.items()
     }
+    if non_finite_batches > 0:
+        logger.warning(
+            f'Epoch {epoch} train | {non_finite_batches} non-finite batches '
+            f'skipped out of {num_batches + non_finite_batches}',
+        )
     logger.info(
         f'Epoch {epoch} train | total: {loss_averages["total_loss"]:.5f}',
     )
+    loss_averages['non_finite_batches'] = float(non_finite_batches)
     return loss_averages, global_batch_count
+
+
+# ---------------------------------------------------------------------------
+# BN calibration — rebuild clean running stats after training
+# ---------------------------------------------------------------------------
+
+def calibrate_reranker_batchnorm(
+    model: torch.nn.Module,
+    train_loader: DataLoader,
+    device: torch.device,
+    data_config,
+    mask_input_index: int,
+    label_input_index: int,
+    calibration_steps: int = 200,
+) -> None:
+    """Reset and recalibrate CoupleReranker BN running stats.
+
+    After training, BN running stats may be stale or corrupted (NaN from
+    degenerate batches). This function:
+    1. Resets all BN running stats in the couple reranker to defaults
+    2. Runs ``calibration_steps`` forward-only batches to accumulate
+       clean running statistics
+    3. Verifies no NaN remains in running stats
+
+    The cascade stays in train() mode (its own BN workaround).
+    """
+    # Reset BN running stats to defaults
+    for module in model.couple_reranker.modules():
+        if isinstance(module, torch.nn.BatchNorm1d):
+            module.reset_running_stats()
+
+    # Calibration pass: couple reranker in train() mode to accumulate
+    # running stats, but no gradients needed.
+    model.couple_reranker.train()
+    model.cascade.train()
+
+    with torch.no_grad():
+        for batch_index, (X, _, _) in enumerate(train_loader):
+            if batch_index >= calibration_steps:
+                break
+
+            inputs = [X[k].to(device) for k in data_config.input_names]
+            inputs = trim_to_max_valid_tracks(inputs, mask_input_index)
+            model_inputs, _ = extract_label_from_inputs(
+                inputs, label_input_index,
+            )
+            points, features, lorentz_vectors, mask = model_inputs
+
+            # Forward through the full pipeline to update BN stats
+            dummy_labels = torch.zeros_like(mask)
+            model._build_couple_inputs(
+                points, features, lorentz_vectors, mask, dummy_labels,
+            )
+            # The couple reranker forward is called inside compute_loss,
+            # but we just need the couple features to flow through BN.
+            # _build_couple_inputs builds features; we also need them to
+            # pass through the reranker's BN layers.
+            couple_inputs = model._build_couple_inputs(
+                points, features, lorentz_vectors, mask, dummy_labels,
+            )
+            model.couple_reranker(couple_inputs['couple_features'])
+
+            if (batch_index + 1) % 50 == 0:
+                logger.info(
+                    f'BN calibration: {batch_index + 1}/{calibration_steps}',
+                )
+
+    model.eval()
+
+
+def check_batchnorm_health(model: torch.nn.Module) -> bool:
+    """Check that all BN running stats in the couple reranker are finite.
+
+    Returns True if all stats are valid, False otherwise.
+    """
+    all_healthy = True
+    for name, module in model.couple_reranker.named_modules():
+        if isinstance(module, torch.nn.BatchNorm1d):
+            if not torch.isfinite(module.running_mean).all():
+                logger.error(
+                    f'NaN in running_mean: {name}',
+                )
+                all_healthy = False
+            if not torch.isfinite(module.running_var).all():
+                logger.error(
+                    f'NaN in running_var: {name}',
+                )
+                all_healthy = False
+    return all_healthy
 
 
 # ---------------------------------------------------------------------------
@@ -733,6 +831,38 @@ def main():
 
     tensorboard_writer.close()
     plot_loss_curves(loss_history, experiment_dir)
+
+    # ---- Post-training BN calibration ----
+    # Rebuild clean running stats so eval() mode works correctly.
+    logger.info('Calibrating CoupleReranker BN running stats...')
+    calibrate_reranker_batchnorm(
+        model, train_loader, device, data_config,
+        mask_input_index, label_input_index,
+        calibration_steps=200,
+    )
+    if check_batchnorm_health(model):
+        logger.info('BN calibration complete — all running stats are finite')
+        # Save a final checkpoint with clean BN stats
+        calibrated_checkpoint = {
+            'epoch': args.epochs,
+            'couple_reranker_state_dict':
+                model.couple_reranker.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'best_val_c_at_100': best_val_c_at_100,
+            'best_val_epoch': best_val_epoch,
+            'global_batch_count': global_batch_count,
+            'val_losses': val_losses,
+            'val_metrics': val_metrics,
+            'args': vars(args),
+        }
+        calibrated_path = os.path.join(
+            checkpoints_dir, 'best_model_calibrated.pt',
+        )
+        torch.save(calibrated_checkpoint, calibrated_path)
+        logger.info(f'Saved calibrated checkpoint: {calibrated_path}')
+    else:
+        logger.error('BN calibration failed — NaN in running stats!')
+
     logger.info(f'Training complete. Best C@100: {best_val_c_at_100:.5f}')
     logger.info(f'Experiment: {experiment_dir}')
 

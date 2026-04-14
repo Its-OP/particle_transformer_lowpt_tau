@@ -59,14 +59,14 @@ K_VALUES_TRACKS="30 50 75 100 150 200"
 # the dataset many more times per epoch and risks memorization. Cutting
 # steps to 100 gives ~9.6k events/epoch — same ballpark as the old
 # baseline — while keeping the larger-batch optimization benefits.
-EPOCHS="${EPOCHS:-50}"
+EPOCHS="${EPOCHS:-80}"
 STEPS_PER_EPOCH="${STEPS_PER_EPOCH:-100}"
 BATCH_SIZE="${BATCH_SIZE:-96}"
 LEARNING_RATE="${LEARNING_RATE:-5e-4}"
 SCHEDULER="${SCHEDULER:-cosine}"
 DEVICE="${DEVICE:-cuda:0}"
 NUM_WORKERS="${NUM_WORKERS:-10}"
-KEEP_BEST_K="${KEEP_BEST_K:-1}"
+KEEP_BEST_K="${KEEP_BEST_K:-5}"
 
 # ---- CoupleReranker architecture ----
 COUPLE_HIDDEN_DIM="${COUPLE_HIDDEN_DIM:-256}"
@@ -262,6 +262,16 @@ for K in ${TOP_K2_VALUES}; do
     echo "----------------------------------------------------------------"
 
     set +e
+    # Adaptive batch size: C(K,2) grows quadratically, reduce batch for
+    # large K to prevent OOM (K=200 OOM'd at batch=96 on 95 GB GPU).
+    if [ "${K}" -ge 200 ]; then
+        EFFECTIVE_BATCH=64
+    elif [ "${K}" -ge 175 ]; then
+        EFFECTIVE_BATCH=80
+    else
+        EFFECTIVE_BATCH="${BATCH_SIZE}"
+    fi
+
     python train_couple_reranker.py \
         --data-config "${DATA_CONFIG}" \
         --data-dir "${DATA_DIR}" \
@@ -277,7 +287,7 @@ for K in ${TOP_K2_VALUES}; do
         --model-name "topk2_${K}" \
         --experiments-dir "${SUBRUN_DIR}" \
         --epochs "${EPOCHS}" \
-        --batch-size "${BATCH_SIZE}" \
+        --batch-size "${EFFECTIVE_BATCH}" \
         --steps-per-epoch "${STEPS_PER_EPOCH}" \
         --lr "${LEARNING_RATE}" \
         --scheduler "${SCHEDULER}" \

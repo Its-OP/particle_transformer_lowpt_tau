@@ -27,6 +27,7 @@ import json
 import logging
 import math
 import os
+import shutil
 import sys
 import time
 import traceback
@@ -654,6 +655,13 @@ def main():
         in_memory=load_in_memory,
     )
     data_config = train_dataset.config
+
+    # Save the auto.yaml used for this run into the experiment directory
+    # so the exact standardization params are reproducible.
+    auto_yaml_pattern = args.data_config.replace('.yaml', '.*.auto.yaml')
+    for auto_yaml_path in glob.glob(auto_yaml_pattern):
+        shutil.copy2(auto_yaml_path, experiment_dir)
+        logger.info(f'Copied auto.yaml to experiment dir: {os.path.basename(auto_yaml_path)}')
 
     val_dataset = SimpleIterDataset(
         val_file_dict,

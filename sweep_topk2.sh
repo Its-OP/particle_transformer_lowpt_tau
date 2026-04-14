@@ -59,11 +59,12 @@ K_VALUES_TRACKS="30 50 75 100 150 200"
 # the dataset many more times per epoch and risks memorization. Cutting
 # steps to 100 gives ~9.6k events/epoch — same ballpark as the old
 # baseline — while keeping the larger-batch optimization benefits.
-EPOCHS="${EPOCHS:-80}"
-STEPS_PER_EPOCH="${STEPS_PER_EPOCH:-100}"
+EPOCHS="${EPOCHS:-60}"
+STEPS_PER_EPOCH="${STEPS_PER_EPOCH:-200}"
 BATCH_SIZE="${BATCH_SIZE:-96}"
 LEARNING_RATE="${LEARNING_RATE:-5e-4}"
 SCHEDULER="${SCHEDULER:-cosine}"
+COSINE_POWER="${COSINE_POWER:-1.0}"
 DEVICE="${DEVICE:-cuda:0}"
 NUM_WORKERS="${NUM_WORKERS:-10}"
 KEEP_BEST_K="${KEEP_BEST_K:-5}"
@@ -291,6 +292,7 @@ for K in ${TOP_K2_VALUES}; do
         --steps-per-epoch "${STEPS_PER_EPOCH}" \
         --lr "${LEARNING_RATE}" \
         --scheduler "${SCHEDULER}" \
+        --cosine-power "${COSINE_POWER}" \
         --device "${DEVICE}" \
         --num-workers "${NUM_WORKERS}" \
         --keep-best-k "${KEEP_BEST_K}" \

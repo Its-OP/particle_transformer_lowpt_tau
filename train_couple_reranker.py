@@ -441,6 +441,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument('--plateau-factor', type=float, default=0.5)
     parser.add_argument('--plateau-patience', type=int, default=5)
     parser.add_argument('--min-lr', type=float, default=1e-6)
+    parser.add_argument(
+        '--cosine-power', type=float, default=1.0,
+        help='Exponent for cosine LR decay. <1 = steeper (faster drop), '
+             '>1 = delayed (stays high then drops steeply). Default 1.0.',
+    )
     parser.add_argument('--grad-clip', type=float, default=1.0)
     parser.add_argument('--train-fraction', type=float, default=0.8)
     parser.add_argument('--val-data-dir', type=str, default=None)
@@ -657,15 +662,21 @@ def main():
     if args.scheduler == 'cosine':
         warmup_epochs = math.ceil(warmup_steps / steps_per_epoch)
         num_post_warmup_epochs = max(1, args.epochs - warmup_epochs)
+        power_info = (
+            f', cosine_power={args.cosine_power}'
+            if args.cosine_power != 1.0 else ''
+        )
         logger.info(
             f'LR schedule: {warmup_steps} warmup steps, then '
-            f'CosineAnnealingLR over {num_post_warmup_epochs} epochs',
+            f'CosineAnnealingLR over {num_post_warmup_epochs} epochs'
+            f'{power_info}',
         )
         scheduler = WarmupThenCosineScheduler(
             optimizer,
             num_warmup_steps=warmup_steps,
             num_post_warmup_epochs=num_post_warmup_epochs,
             min_lr=args.min_lr,
+            cosine_power=args.cosine_power,
         )
     else:
         scheduler = WarmupThenPlateauScheduler(

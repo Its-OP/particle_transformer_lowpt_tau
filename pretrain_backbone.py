@@ -334,28 +334,33 @@ class WarmupThenPlateauScheduler:
 
 
 class WarmupThenCosineScheduler:
-    """Two-phase LR scheduler: linear warmup → cosine annealing.
+    """Two-phase LR scheduler: linear warmup → power-cosine annealing.
 
     Phase 1 (warmup): LR scales linearly from 0 to base_lr over
         num_warmup_steps. Called per training step via step_batch().
 
-    Phase 2 (cosine): LR decays following a cosine curve from base_lr
-        to min_lr over the remaining epochs. Called per epoch via
-        step_epoch(val_loss).
-
-    Cosine annealing provides a smooth, monotonic LR decay that avoids
-    the abrupt drops of step/plateau schedulers. The schedule is fully
-    deterministic — no dependence on val_loss trajectory.
+    Phase 2 (cosine): LR decays following a power-warped cosine curve
+        from base_lr to min_lr over the remaining epochs. Called per
+        epoch via step_epoch(val_loss).
 
     LR formula (post-warmup):
-        lr(t) = min_lr + 0.5 * (base_lr - min_lr) * (1 + cos(π * t / T_max))
-    where t = epoch index within the cosine phase, T_max = total cosine epochs.
+        progress = (t / T_max) ^ cosine_power
+        lr = min_lr + 0.5 * (base_lr - min_lr) * (1 + cos(π * progress))
+
+    where t = epoch index within the cosine phase, T_max = total cosine
+    epochs, and cosine_power controls the decay steepness:
+        - cosine_power = 1.0: standard symmetric cosine (default)
+        - cosine_power < 1.0: steeper decay — LR drops faster initially
+        - cosine_power > 1.0: delayed decay — LR stays near peak longer,
+          then drops steeply at the end
 
     Args:
         optimizer: Optimizer whose LR will be controlled.
         num_warmup_steps: Number of linear warmup steps.
         num_post_warmup_epochs: Number of epochs for the cosine decay phase.
         min_lr: Lower bound on the learning rate (default 1e-6).
+        cosine_power: Exponent applied to the cosine phase progress.
+            Controls the shape of the LR decay curve.
     """
 
     def __init__(
@@ -364,20 +369,30 @@ class WarmupThenCosineScheduler:
         num_warmup_steps: int,
         num_post_warmup_epochs: int,
         min_lr: float = 1e-6,
+        cosine_power: float = 1.0,
     ):
         self.optimizer = optimizer
         self.num_warmup_steps = num_warmup_steps
         self.base_lrs = [group['lr'] for group in optimizer.param_groups]
         self.current_step = 0
         self.warmup_finished = False
+        self.cosine_power = cosine_power
+        self.min_lr = min_lr
+        self.t_max = max(1, num_post_warmup_epochs)
+        self.cosine_epoch = 0
 
-        # CosineAnnealingLR for post-warmup phase.
-        # T_max = number of epoch-level steps over which cosine decays to eta_min.
-        self.cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer,
-            T_max=max(1, num_post_warmup_epochs),
-            eta_min=min_lr,
-        )
+        if cosine_power == 1.0:
+            # Standard cosine: use PyTorch built-in for exact compatibility
+            self._use_builtin_cosine = True
+            self.cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer,
+                T_max=self.t_max,
+                eta_min=min_lr,
+            )
+        else:
+            # Power-warped cosine: manual LR computation
+            self._use_builtin_cosine = False
+            self.cosine_scheduler = None
 
     def step_batch(self):
         """Call once per training batch. Only active during warmup phase.
@@ -413,8 +428,25 @@ class WarmupThenCosineScheduler:
         for interface compatibility with WarmupThenPlateauScheduler but
         is not used).
         """
-        if self.warmup_finished:
+        if not self.warmup_finished:
+            return
+
+        if self._use_builtin_cosine:
             self.cosine_scheduler.step()
+        else:
+            # Power-warped cosine:
+            # progress = (t / T_max) ^ cosine_power
+            # lr = min_lr + 0.5 * (base_lr - min_lr) * (1 + cos(π * progress))
+            self.cosine_epoch += 1
+            progress = min(self.cosine_epoch / self.t_max, 1.0)
+            warped_progress = progress ** self.cosine_power
+            cosine_factor = 0.5 * (1.0 + math.cos(math.pi * warped_progress))
+            for param_group, base_lr in zip(
+                self.optimizer.param_groups, self.base_lrs,
+            ):
+                param_group['lr'] = (
+                    self.min_lr + (base_lr - self.min_lr) * cosine_factor
+                )
 
     def get_last_lr(self) -> list[float]:
         """Return current LR for each param group (for logging)."""
@@ -422,13 +454,17 @@ class WarmupThenCosineScheduler:
 
     def state_dict(self) -> dict:
         """Serialize scheduler state for checkpointing."""
-        return {
+        result = {
             'current_step': self.current_step,
             'warmup_finished': self.warmup_finished,
             'base_lrs': self.base_lrs,
             'num_warmup_steps': self.num_warmup_steps,
-            'cosine_scheduler_state': self.cosine_scheduler.state_dict(),
+            'cosine_power': self.cosine_power,
+            'cosine_epoch': self.cosine_epoch,
         }
+        if self._use_builtin_cosine:
+            result['cosine_scheduler_state'] = self.cosine_scheduler.state_dict()
+        return result
 
     def load_state_dict(self, state: dict):
         """Restore scheduler state from checkpoint."""
@@ -436,9 +472,11 @@ class WarmupThenCosineScheduler:
         self.warmup_finished = state['warmup_finished']
         self.base_lrs = state['base_lrs']
         self.num_warmup_steps = state['num_warmup_steps']
-        self.cosine_scheduler.load_state_dict(
-            state['cosine_scheduler_state']
-        )
+        self.cosine_epoch = state.get('cosine_epoch', 0)
+        if self._use_builtin_cosine and 'cosine_scheduler_state' in state:
+            self.cosine_scheduler.load_state_dict(
+                state['cosine_scheduler_state'],
+            )
 
 
 def train_one_epoch(

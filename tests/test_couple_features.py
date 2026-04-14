@@ -573,3 +573,114 @@ class TestBuildCoupleFeaturesBatched:
         expected_n = NUM_TRACKS * (NUM_TRACKS - 1) // 2
         assert result['couple_features'].shape[2] == expected_n
         assert result['filter_a_mask'].shape[1] == expected_n
+
+    # --- track_valid_mask tests (padding exclusion) ---
+
+    def test_track_valid_mask_excludes_padding_couples_from_filter_a(self):
+        """Couples where either track is invalid must be False in filter_a_mask."""
+        batch = self._make_batch(batch_size=2)
+        # Mark track 3 and 4 as padding (invalid) in event 0
+        track_valid_mask = torch.ones(2, NUM_TRACKS, dtype=torch.bool)
+        track_valid_mask[0, 3] = False
+        track_valid_mask[0, 4] = False
+
+        result = build_couple_features_batched(
+            top_k2_features=batch['features'],
+            top_k2_points=batch['points'],
+            top_k2_lorentz=batch['lorentz'],
+            top_k2_stage1_scores=batch['stage1_scores'],
+            top_k2_stage2_scores=batch['stage2_scores'],
+            top_k2_track_labels=batch['track_labels'],
+            track_valid_mask=track_valid_mask,
+        )
+        upper_i, upper_j = enumerate_couples_canonical(NUM_TRACKS, torch.device('cpu'))
+        # Every couple involving track 3 or 4 must be masked out
+        involves_invalid = (upper_i == 3) | (upper_i == 4) | (upper_j == 3) | (upper_j == 4)
+        assert not result['filter_a_mask'][0, involves_invalid].any(), (
+            'Couples involving invalid tracks must be excluded from filter_a_mask'
+        )
+        # Event 1 (all valid) should be unaffected
+        result_no_mask = build_couple_features_batched(
+            top_k2_features=batch['features'],
+            top_k2_points=batch['points'],
+            top_k2_lorentz=batch['lorentz'],
+            top_k2_stage1_scores=batch['stage1_scores'],
+            top_k2_stage2_scores=batch['stage2_scores'],
+            top_k2_track_labels=batch['track_labels'],
+        )
+        assert torch.equal(result['filter_a_mask'][1], result_no_mask['filter_a_mask'][1])
+
+    def test_track_valid_mask_zeroes_padding_features(self):
+        """Features/scores for invalid tracks must be zeroed before couple
+        feature computation to prevent Inf from entering the pipeline."""
+        batch = self._make_batch(batch_size=2)
+        # Inject -inf into scores of invalid tracks (mimics cascade padding)
+        batch['stage1_scores'][0, 3] = float('-inf')
+        batch['stage1_scores'][0, 4] = float('-inf')
+        batch['stage2_scores'][0, 3] = float('-inf')
+        batch['stage2_scores'][0, 4] = float('-inf')
+
+        track_valid_mask = torch.ones(2, NUM_TRACKS, dtype=torch.bool)
+        track_valid_mask[0, 3] = False
+        track_valid_mask[0, 4] = False
+
+        result = build_couple_features_batched(
+            top_k2_features=batch['features'],
+            top_k2_points=batch['points'],
+            top_k2_lorentz=batch['lorentz'],
+            top_k2_stage1_scores=batch['stage1_scores'],
+            top_k2_stage2_scores=batch['stage2_scores'],
+            top_k2_track_labels=batch['track_labels'],
+            track_valid_mask=track_valid_mask,
+        )
+        # ALL couple features must be finite (no Inf from -inf scores)
+        assert torch.isfinite(result['couple_features']).all(), (
+            'Couple features must be finite when track_valid_mask zeroes out padding'
+        )
+
+    def test_no_track_valid_mask_preserves_original_behavior(self):
+        """Omitting track_valid_mask should behave identically to before."""
+        batch = self._make_batch(batch_size=2)
+        result_with = build_couple_features_batched(
+            top_k2_features=batch['features'],
+            top_k2_points=batch['points'],
+            top_k2_lorentz=batch['lorentz'],
+            top_k2_stage1_scores=batch['stage1_scores'],
+            top_k2_stage2_scores=batch['stage2_scores'],
+            top_k2_track_labels=batch['track_labels'],
+            track_valid_mask=None,
+        )
+        result_without = build_couple_features_batched(
+            top_k2_features=batch['features'],
+            top_k2_points=batch['points'],
+            top_k2_lorentz=batch['lorentz'],
+            top_k2_stage1_scores=batch['stage1_scores'],
+            top_k2_stage2_scores=batch['stage2_scores'],
+            top_k2_track_labels=batch['track_labels'],
+        )
+        assert torch.equal(result_with['couple_features'], result_without['couple_features'])
+        assert torch.equal(result_with['filter_a_mask'], result_without['filter_a_mask'])
+
+    def test_all_tracks_valid_mask_matches_no_mask(self):
+        """An all-True mask should produce identical results to no mask."""
+        batch = self._make_batch(batch_size=2)
+        all_valid = torch.ones(2, NUM_TRACKS, dtype=torch.bool)
+        result_mask = build_couple_features_batched(
+            top_k2_features=batch['features'],
+            top_k2_points=batch['points'],
+            top_k2_lorentz=batch['lorentz'],
+            top_k2_stage1_scores=batch['stage1_scores'],
+            top_k2_stage2_scores=batch['stage2_scores'],
+            track_valid_mask=all_valid,
+        )
+        result_no_mask = build_couple_features_batched(
+            top_k2_features=batch['features'],
+            top_k2_points=batch['points'],
+            top_k2_lorentz=batch['lorentz'],
+            top_k2_stage1_scores=batch['stage1_scores'],
+            top_k2_stage2_scores=batch['stage2_scores'],
+        )
+        assert torch.allclose(
+            result_mask['couple_features'], result_no_mask['couple_features'], atol=1e-6,
+        )
+        assert torch.equal(result_mask['filter_a_mask'], result_no_mask['filter_a_mask'])

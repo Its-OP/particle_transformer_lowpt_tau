@@ -314,6 +314,7 @@ def build_couple_features_batched(
     top_k2_stage1_scores: torch.Tensor,
     top_k2_stage2_scores: torch.Tensor,
     top_k2_track_labels: torch.Tensor | None = None,
+    track_valid_mask: torch.Tensor | None = None,
     m_tau: float = M_TAU_GEV,
 ) -> dict[str, torch.Tensor]:
     """Vectorized batched version of the per-event feature builder.
@@ -335,6 +336,12 @@ def build_couple_features_batched(
         top_k2_stage1_scores: ``(B, K2)`` Stage 1 scores.
         top_k2_stage2_scores: ``(B, K2)`` Stage 2 scores.
         top_k2_track_labels: optional ``(B, K2)`` per-track binary labels.
+        track_valid_mask: optional ``(B, K2)`` boolean — True for real
+            tracks, False for padding. When provided, padding tracks are
+            zeroed out before couple feature computation (preventing
+            ``-inf`` cascade scores from producing ``Inf`` in the feature
+            vector), and couples involving any padding track are excluded
+            from ``filter_a_mask``.
         m_tau: kinematic mass cut (default = PDG τ mass).
 
     Returns:
@@ -342,13 +349,30 @@ def build_couple_features_batched(
             ``couple_features``: ``(B, 51, n_couples)`` per-couple feature
                 tensor where ``n_couples = K2 * (K2 - 1) / 2`` (always).
             ``filter_a_mask``: ``(B, n_couples)`` boolean — True for couples
-                passing the loose mass cut.
+                passing the loose mass cut AND having both tracks valid.
             ``couple_labels``: ``(B, n_couples)`` boolean — True iff both
                 tracks of the couple are GT pions. Only present when
                 ``top_k2_track_labels`` is provided.
     """
     batch_size, _, k2 = top_k2_features.shape
     device = top_k2_features.device
+
+    # Zero out padding tracks so that -inf cascade scores (and garbage
+    # features/lorentz vectors from gathered padding positions) never
+    # enter the couple feature computation.
+    # Uses torch.where instead of multiplication because -inf * 0 = NaN
+    # in IEEE 754 arithmetic.
+    if track_valid_mask is not None:
+        # valid_mask_3d: (B, 1, K2) for broadcasting against (B, C, K2)
+        valid_mask_3d = track_valid_mask.unsqueeze(1)
+        zero_2d = torch.zeros(1, device=device, dtype=top_k2_features.dtype)
+        top_k2_features = torch.where(valid_mask_3d, top_k2_features, zero_2d)
+        top_k2_points = torch.where(valid_mask_3d, top_k2_points, zero_2d)
+        top_k2_lorentz = torch.where(valid_mask_3d, top_k2_lorentz, zero_2d)
+        # Scores: (B, K2)
+        zero_1d = torch.zeros(1, device=device, dtype=top_k2_stage1_scores.dtype)
+        top_k2_stage1_scores = torch.where(track_valid_mask, top_k2_stage1_scores, zero_1d)
+        top_k2_stage2_scores = torch.where(track_valid_mask, top_k2_stage2_scores, zero_1d)
 
     # Canonical (i, j) indices, shared by every event in the batch.
     upper_i, upper_j = torch.triu_indices(k2, k2, offset=1, device=device).unbind(0)
@@ -467,7 +491,12 @@ def build_couple_features_batched(
     assert couple_features.shape[1] == COUPLE_FEATURE_DIM
 
     # Filter A: m(ij) <= m_tau (boolean mask, kept separate from features)
+    # Couples involving padding tracks are excluded when track_valid_mask
+    # is provided — both tracks must be real AND mass must pass the cut.
     filter_a_mask = m_ij <= m_tau
+    if track_valid_mask is not None:
+        both_tracks_valid = track_valid_mask[:, upper_i] & track_valid_mask[:, upper_j]
+        filter_a_mask = filter_a_mask & both_tracks_valid
 
     result: dict[str, torch.Tensor] = {
         'couple_features': couple_features,

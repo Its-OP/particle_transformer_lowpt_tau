@@ -88,11 +88,11 @@ def evaluate_batch(
     dummy_labels = torch.zeros_like(mask)
 
     # ---- Stage 1 → top-K1 tracks ----
-    # train() mode for BatchNorm: running statistics are stale because
-    # the training validation loop used train() mode (train_cascade.py:285).
-    # Without this, Stage 1 R@K drops from 0.90→0.70, Stage 2 also degrades.
-    # The couple reranker also needs train() mode — its BN running stats
-    # were corrupted by NaN during training (see NanSafeBatchNorm1d).
+    # train() mode for BatchNorm: use batch statistics instead of
+    # running stats. The cascade's running stats are stale (training
+    # validation loop used train() mode). The couple reranker also
+    # uses train() mode to match training-time conditions — batch
+    # stats are more accurate than calibrated running stats.
     model.cascade.train()
     model.couple_reranker.train()
     filtered = model.cascade._run_stage1(
